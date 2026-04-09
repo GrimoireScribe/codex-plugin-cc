@@ -67,6 +67,7 @@ const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json"
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+const REASONING_EFFORT_ALIASES = new Map([["minimal", "low"]]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
@@ -192,7 +193,7 @@ function normalizeReasoningEffort(effort) {
       `Unsupported reasoning effort "${effort}". Use one of: none, minimal, low, medium, high, xhigh.`
     );
   }
-  return normalized;
+  return REASONING_EFFORT_ALIASES.get(normalized) ?? normalized;
 }
 
 function normalizeArgv(argv) {

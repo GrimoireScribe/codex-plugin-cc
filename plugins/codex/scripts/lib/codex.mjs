@@ -790,12 +790,18 @@ async function getCodexAuthStatusFromClient(client, cwd) {
 }
 
 export function getCodexAvailability(cwd) {
-  const versionStatus = binaryAvailable("codex", ["--version"], { cwd });
+  const versionStatus = binaryAvailable("codex", ["--version"], {
+    cwd,
+    shell: process.platform === "win32"
+  });
   if (!versionStatus.available) {
     return versionStatus;
   }
 
-  const appServerStatus = binaryAvailable("codex", ["app-server", "--help"], { cwd });
+  const appServerStatus = binaryAvailable("codex", ["app-server", "--help"], {
+    cwd,
+    shell: process.platform === "win32"
+  });
   if (!appServerStatus.available) {
     return {
       available: false,

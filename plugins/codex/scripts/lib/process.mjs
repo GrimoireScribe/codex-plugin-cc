@@ -9,7 +9,7 @@ export function runCommand(command, args = [], options = {}) {
     input: options.input,
     maxBuffer: options.maxBuffer,
     stdio: options.stdio ?? "pipe",
-    shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
+    shell: options.shell ?? false,
     windowsHide: true
   });
 
@@ -22,6 +22,26 @@ export function runCommand(command, args = [], options = {}) {
     stderr: result.stderr ?? "",
     error: result.error ?? null
   };
+}
+
+export function processExists(pid, options = {}) {
+  if (!Number.isFinite(pid)) {
+    return false;
+  }
+
+  const killImpl = options.killImpl ?? process.kill.bind(process);
+  try {
+    killImpl(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "EPERM") {
+      return true;
+    }
+    if (error?.code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 export function runCommandChecked(command, args = [], options = {}) {

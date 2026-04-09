@@ -1,19 +1,20 @@
 {
-  "name": "openai-codex",
+  "name": "grimoire-openai-codex",
   "owner": {
-    "name": "OpenAI"
+    "name": "Grimoire"
   },
   "metadata": {
-    "description": "Codex plugins to use in Claude Code for delegation and code review.",
-    "version": "1.0.3"
+    "description": "Hardened Codex plugin fork for Claude Code with Grimoire-specific runtime fixes.",
+    "version": "1.0.3-grimoire.2"
   },
   "plugins": [
     {
       "name": "codex",
-      "description": "Use Codex from Claude Code to review code or delegate tasks.",
-      "version": "1.0.3",
+      "description": "Use Codex from Claude Code to review code or delegate tasks with the hardened Grimoire fork.",
+      "version": "1.0.3-grimoire.2",
       "author": {
-        "name": "OpenAI"
+        "name": "Grimoire",
+        "url": "https://github.com/GrimoireScribe"
       },
       "source": "./plugins/codex"
     }

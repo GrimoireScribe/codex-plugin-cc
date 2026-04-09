@@ -1,4 +1,4 @@
-# Codex plugin for Claude Code
+# Grimoire Codex Plugin for Claude Code
 
 Use Codex from inside Claude Code for code reviews or to delegate tasks to Codex.
 
@@ -21,16 +21,18 @@ they already have.
 
 ## Install
 
-Add the marketplace in Claude Code:
+Add the forked marketplace in Claude Code:
 
 ```bash
-/plugin marketplace add openai/codex-plugin-cc
+/plugin marketplace add GrimoireScribe/codex-plugin-cc
 ```
 
-Install the plugin:
+If the stock OpenAI Codex plugin is already enabled, disable or uninstall `codex@openai-codex` first so Claude only exposes one `/codex:*` command set.
+
+Install the forked plugin:
 
 ```bash
-/plugin install codex@openai-codex
+/plugin install codex@grimoire-openai-codex
 ```
 
 Reload plugins:
@@ -46,6 +48,10 @@ Then run:
 ```
 
 `/codex:setup` will tell you whether Codex is ready. If Codex is missing and npm is available, it can offer to install Codex for you.
+
+This fork keeps the upstream command surface but adds Grimoire-specific hardening for Windows shell handling, stale job cleanup, broker reuse, and rescue-task prompt hygiene.
+
+Current fork version: `1.0.3-grimoire.2`
 
 If you prefer to install Codex yourself, use:
 

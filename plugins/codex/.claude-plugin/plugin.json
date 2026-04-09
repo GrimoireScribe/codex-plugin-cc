@@ -1,8 +1,20 @@
 {
   "name": "codex",
-  "version": "1.0.3",
-  "description": "Use Codex from Claude Code to review code or delegate tasks.",
+  "version": "1.0.3-grimoire.2",
+  "description": "Use Codex from Claude Code to review code or delegate tasks with the hardened Grimoire fork.",
   "author": {
-    "name": "OpenAI"
-  }
+    "name": "Grimoire",
+    "url": "https://github.com/GrimoireScribe"
+  },
+  "homepage": "https://github.com/GrimoireScribe/codex-plugin-cc",
+  "repository": "https://github.com/GrimoireScribe/codex-plugin-cc",
+  "license": "Apache-2.0",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "plugin",
+    "review",
+    "windows"
+  ],
+  "skills": "./skills/"
 }

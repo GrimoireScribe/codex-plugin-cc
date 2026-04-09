@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { processExists } from "./process.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 const STATE_VERSION = 1;
@@ -83,6 +84,33 @@ function pruneJobs(jobs) {
   return [...jobs]
     .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")))
     .slice(0, MAX_JOBS);
+}
+
+function reconcileActiveJobs(jobs) {
+  let changed = false;
+  const completedAt = nowIso();
+  const nextJobs = jobs.map((job) => {
+    if (job.status !== "queued" && job.status !== "running") {
+      return job;
+    }
+
+    const pid = Number(job.pid);
+    if (processExists(pid)) {
+      return job;
+    }
+
+    changed = true;
+    return {
+      ...job,
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      completedAt,
+      errorMessage: job.errorMessage ?? "Background Codex job ended unexpectedly before updating its final state."
+    };
+  });
+
+  return { changed, jobs: nextJobs };
 }
 
 function removeFileIfExists(filePath) {
@@ -195,7 +223,15 @@ export function upsertJob(cwd, jobPatch) {
 }
 
 export function listJobs(cwd) {
-  return loadState(cwd).jobs;
+  const state = loadState(cwd);
+  const reconciled = reconcileActiveJobs(state.jobs);
+  if (!reconciled.changed) {
+    return state.jobs;
+  }
+  return saveState(cwd, {
+    ...state,
+    jobs: reconciled.jobs
+  }).jobs;
 }
 
 export function setConfig(cwd, key, value) {
