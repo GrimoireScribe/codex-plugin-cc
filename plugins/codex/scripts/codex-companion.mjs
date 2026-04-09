@@ -70,6 +70,77 @@ const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "hi
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 
+// LOCAL PATCH (2026-04-08): rescue-hygiene prepend to prevent the heredoc write-trap
+// pattern observed in the PM#674 test-agent incident. When POAgent spawns codex-rescue
+// to produce a report, review, or analysis, the external Codex runtime inherits no
+// context about POAgent's persistence protocol. If Codex tries to persist a multi-
+// paragraph artifact via Bash heredocs on Windows Git Bash (or PowerShell with escape-
+// heavy content), it can fall into the same shell-quoting escalation loop that test-
+// agent hit on 2026-04-08. This patch unconditionally prepends a small protocol block
+// to every forwarded task prompt so the Codex runtime sees the guidance even when
+// POAgent forgets to include it in the spawn prompt.
+//
+// Full incident analysis:
+//   E:\OneDrive\Grimoire\GrimoireProductOwner\docs\ops\reviews\heredoc-write-trap-analysis_2026-04-08.md
+// Codex's independent verdict:
+//   C:\Users\meiyo\codex_verdict_heredoc_write_trap_2026-04-08.md
+//
+// The helper is idempotent: if the marker is already in the prompt (because POAgent
+// or the caller already prepended it), the prompt is returned unchanged. That means
+// it's safe to apply at multiple layers without double-prepending.
+const POAGENT_RESCUE_HYGIENE_MARKER = "[POAGENT-RESCUE-HYGIENE-2026-04-08]";
+const POAGENT_RESCUE_HYGIENE_BLOCK = `${POAGENT_RESCUE_HYGIENE_MARKER}
+You are being invoked from the GrimoireScribe / GrimoireProductOwner project context.
+POAgent is the Product Owner agent for this project and is likely the caller.
+
+## Rescue-hygiene protocol (read before starting work)
+
+1. **Inline-return for reports**: if your task is to produce a review, analysis,
+   verification report, or any multi-paragraph artifact, return the full artifact
+   inline in your final response as a fenced markdown block. Do NOT attempt to
+   persist a multi-paragraph markdown artifact directly via Bash heredocs, printf,
+   python -c, cat > file << EOF, or similar shell-mediated approaches. Those paths
+   are fragile on Windows + Git Bash / PowerShell when content is quote-heavy,
+   contains markdown tables, code fences, or mixed quotes. POAgent has its own
+   Edit tool and will persist your returned artifact to the correct file.
+
+2. **Stop-rule for repeated shell failures**: if any bash command to persist text
+   fails twice with the same quoting or parse error class (e.g. "unexpected EOF
+   while looking for matching '", SyntaxError from an embedded interpreter,
+   command-not-found from heredoc leakage, Python helper failing to find a
+   /tmp script that printf wrote), STOP. Do not attempt a third shell variation.
+   Do not escalate to chr(39)/chr(10) workarounds, nested heredocs, or Python-
+   inside-Bash-inside-Python. Switch to inline return and let the caller persist.
+
+3. **Writable clone vs review clone**: writable work happens at
+   E:\\OneDrive\\Grimoire\\GrimoireScribe. Read-only review work happens at
+   E:\\OneDrive\\Grimoire\\GrimoireScribe-review (3-layer push protection:
+   DISABLED URL, per-clone sshCommand with readonly key, GitHub deploy key
+   marked read-only server-side). Use the review clone for any review/inspection
+   task. Never attempt to push from the review clone.
+
+4. **PM tracker is the source of truth**: feature state lives at
+   https://grimoirescribe.com/api/pm/data (not GitHub Issues, not local files).
+   PM_API_KEY is in the project .env.
+
+This protocol exists because of the 2026-04-08 incident where a test-agent
+subagent burned 37 tool calls trying to persist a multi-paragraph Test Report
+through Bash heredocs + Python helpers and ultimately had to be stopped and
+have its report reconstructed from the transcript. Full analysis at:
+E:\\OneDrive\\Grimoire\\GrimoireProductOwner\\docs\\ops\\reviews\\heredoc-write-trap-analysis_2026-04-08.md
+
+After reading this block, proceed with the user's actual request below.
+
+---
+
+`;
+
+function injectRescueHygiene(prompt) {
+  if (typeof prompt !== "string" || !prompt.trim()) return prompt;
+  if (prompt.includes(POAGENT_RESCUE_HYGIENE_MARKER)) return prompt;
+  return POAGENT_RESCUE_HYGIENE_BLOCK + prompt;
+}
+
 function printUsage() {
   console.log(
     [
@@ -479,9 +550,14 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
+  // LOCAL PATCH (2026-04-08): inject POAgent rescue-hygiene block into every task
+  // prompt. Idempotent — no-op if the marker is already present. See helper
+  // definition near top of file for full rationale.
+  const hygienizedPrompt = injectRescueHygiene(request.prompt);
+
   const result = await runAppServerTurn(workspaceRoot, {
     resumeThreadId,
-    prompt: request.prompt,
+    prompt: hygienizedPrompt,
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
     effort: request.effort,

@@ -851,11 +851,24 @@ export async function getCodexAuthStatus(cwd, options = {}) {
     });
     return await getCodexAuthStatusFromClient(client, cwd);
   } catch (error) {
-    return buildAuthStatus({
-      loggedIn: false,
-      detail: error instanceof Error ? error.message : String(error),
-      source: "app-server"
-    });
+    if (client) {
+      await client.close().catch(() => {});
+      client = null;
+    }
+
+    try {
+      client = await CodexAppServerClient.connect(cwd, {
+        env: options.env,
+        disableBroker: true
+      });
+      return await getCodexAuthStatusFromClient(client, cwd);
+    } catch (fallbackError) {
+      return buildAuthStatus({
+        loggedIn: false,
+        detail: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+        source: "app-server"
+      });
+    }
   } finally {
     if (client) {
       await client.close().catch(() => {});

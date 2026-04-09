@@ -11,6 +11,8 @@ const FALLBACK_STATE_ROOT_DIR = path.join(os.tmpdir(), "codex-companion");
 const STATE_FILE_NAME = "state.json";
 const JOBS_DIR_NAME = "jobs";
 const MAX_JOBS = 50;
+const JSON_READ_RETRY_ATTEMPTS = 3;
+const JSON_READ_RETRY_DELAY_MS = 10;
 
 function nowIso() {
   return new Date().toISOString();
@@ -87,6 +89,52 @@ function removeFileIfExists(filePath) {
   if (filePath && fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
   }
+}
+
+function sleepSync(ms) {
+  if (typeof SharedArrayBuffer !== "function") {
+    return;
+  }
+  const buffer = new SharedArrayBuffer(4);
+  const view = new Int32Array(buffer);
+  Atomics.wait(view, 0, 0, ms);
+}
+
+function writeFileAtomically(filePath, content) {
+  const tempFile = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  fs.writeFileSync(tempFile, content, "utf8");
+
+  try {
+    fs.renameSync(tempFile, filePath);
+    return;
+  } catch {
+    try {
+      removeFileIfExists(filePath);
+      fs.renameSync(tempFile, filePath);
+      return;
+    } catch {
+      fs.writeFileSync(filePath, content, "utf8");
+    } finally {
+      removeFileIfExists(tempFile);
+    }
+  }
+}
+
+function readJsonFileWithRetry(filePath) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < JSON_READ_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    } catch (error) {
+      lastError = error;
+      if (attempt < JSON_READ_RETRY_ATTEMPTS - 1) {
+        sleepSync(JSON_READ_RETRY_DELAY_MS);
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 export function saveState(cwd, state) {
@@ -166,12 +214,12 @@ export function getConfig(cwd) {
 export function writeJobFile(cwd, jobId, payload) {
   ensureStateDir(cwd);
   const jobFile = resolveJobFile(cwd, jobId);
-  fs.writeFileSync(jobFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  writeFileAtomically(jobFile, `${JSON.stringify(payload, null, 2)}\n`);
   return jobFile;
 }
 
 export function readJobFile(jobFile) {
-  return JSON.parse(fs.readFileSync(jobFile, "utf8"));
+  return readJsonFileWithRetry(jobFile);
 }
 
 function removeJobFile(jobFile) {

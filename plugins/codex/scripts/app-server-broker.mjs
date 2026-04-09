@@ -77,17 +77,16 @@ async function main() {
     }
     if (activeStreamSocket === socket) {
       activeStreamSocket = null;
-      activeStreamThreadIds = null;
     }
   }
 
   function routeNotification(message) {
     const target = activeRequestSocket ?? activeStreamSocket;
-    if (!target) {
-      return;
+    if (target) {
+      send(target, message);
     }
-    send(target, message);
-    if (message.method === "turn/completed" && activeStreamSocket === target) {
+
+    if (message.method === "turn/completed" && activeStreamThreadIds) {
       const threadId = message.params?.threadId ?? null;
       if (!threadId || !activeStreamThreadIds || activeStreamThreadIds.has(threadId)) {
         activeStreamSocket = null;
@@ -167,11 +166,12 @@ async function main() {
           continue;
         }
 
+        const hasActiveStream = Boolean(activeStreamThreadIds);
         const allowInterruptDuringActiveStream =
-          isInterruptRequest(message) && activeStreamSocket && activeStreamSocket !== socket && !activeRequestSocket;
+          isInterruptRequest(message) && hasActiveStream && activeStreamSocket !== socket && !activeRequestSocket;
 
         if (
-          ((activeRequestSocket && activeRequestSocket !== socket) || (activeStreamSocket && activeStreamSocket !== socket)) &&
+          ((activeRequestSocket && activeRequestSocket !== socket) || (hasActiveStream && activeStreamSocket !== socket)) &&
           !allowInterruptDuringActiveStream
         ) {
           send(socket, {

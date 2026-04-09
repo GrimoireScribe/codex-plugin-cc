@@ -106,7 +106,13 @@ export function createJobProgressUpdater(workspaceRoot, jobId) {
       return;
     }
 
-    const storedJob = readJobFile(jobFile);
+    let storedJob;
+    try {
+      storedJob = readJobFile(jobFile);
+    } catch {
+      return;
+    }
+
     writeJobFile(workspaceRoot, jobId, {
       ...storedJob,
       ...patch
@@ -136,7 +142,11 @@ function readStoredJobOrNull(workspaceRoot, jobId) {
   if (!fs.existsSync(jobFile)) {
     return null;
   }
-  return readJobFile(jobFile);
+  try {
+    return readJobFile(jobFile);
+  } catch {
+    return null;
+  }
 }
 
 export async function runTrackedJob(job, runner, options = {}) {

@@ -77,23 +77,44 @@ export function splitRawArgumentString(raw) {
   const tokens = [];
   let current = "";
   let quote = null;
-  let escaping = false;
+  const canEscapeOutsideQuotes = (nextCharacter) =>
+    nextCharacter === "\\" || nextCharacter === "\"" || nextCharacter === "'" || /\s/.test(nextCharacter ?? "");
+  const canEscapeInsideDoubleQuotes = (nextCharacter) =>
+    nextCharacter === "\\" || nextCharacter === "\"" || nextCharacter === "$" || nextCharacter === "`";
 
-  for (const character of raw) {
-    if (escaping) {
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index];
+    const nextCharacter = raw[index + 1];
+
+    if (quote === "'") {
+      if (character === "'") {
+        quote = null;
+      } else {
+        current += character;
+      }
+      continue;
+    }
+
+    if (quote === "\"") {
+      if (character === "\"") {
+        quote = null;
+        continue;
+      }
+
+      if (character === "\\" && canEscapeInsideDoubleQuotes(nextCharacter)) {
+        current += nextCharacter;
+        index += 1;
+        continue;
+      }
+
       current += character;
-      escaping = false;
       continue;
     }
 
     if (character === "\\") {
-      escaping = true;
-      continue;
-    }
-
-    if (quote) {
-      if (character === quote) {
-        quote = null;
+      if (canEscapeOutsideQuotes(nextCharacter)) {
+        current += nextCharacter;
+        index += 1;
       } else {
         current += character;
       }
@@ -114,10 +135,6 @@ export function splitRawArgumentString(raw) {
     }
 
     current += character;
-  }
-
-  if (escaping) {
-    current += "\\";
   }
 
   if (current) {
