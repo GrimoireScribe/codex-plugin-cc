@@ -21,6 +21,7 @@ const PLUGIN_MANIFEST = JSON.parse(fs.readFileSync(PLUGIN_MANIFEST_URL, "utf8"))
 
 export const BROKER_ENDPOINT_ENV = "CODEX_COMPANION_APP_SERVER_ENDPOINT";
 export const BROKER_BUSY_RPC_CODE = -32001;
+const DEFAULT_RPC_TIMEOUT_MS = 60_000;
 
 /** @type {ClientInfo} */
 const DEFAULT_CLIENT_INFO = {
@@ -89,9 +90,42 @@ class AppServerClientBase {
 
     const id = this.nextId;
     this.nextId += 1;
+    const timeoutMs = Math.max(0, Number(this.options.requestTimeoutMs) || DEFAULT_RPC_TIMEOUT_MS);
 
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
+      const timeout =
+        timeoutMs > 0
+          ? setTimeout(() => {
+              const pending = this.pending.get(id);
+              if (!pending) {
+                return;
+              }
+              this.pending.delete(id);
+              reject(
+                createProtocolError(
+                  `codex app-server ${method} timed out after ${timeoutMs}ms.`,
+                  { code: -32002, method, timeoutMs }
+                )
+              );
+            }, timeoutMs)
+          : null;
+      timeout?.unref?.();
+
+      this.pending.set(id, {
+        resolve: (value) => {
+          if (timeout) {
+            clearTimeout(timeout);
+          }
+          resolve(value);
+        },
+        reject: (error) => {
+          if (timeout) {
+            clearTimeout(timeout);
+          }
+          reject(error);
+        },
+        method
+      });
       this.sendMessage({ id, method, params });
     });
   }

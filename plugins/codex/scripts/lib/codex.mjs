@@ -24,6 +24,8 @@
  *   pendingCollaborations: Set<string>,
  *   activeSubagentTurns: Set<string>,
  *   completionTimer: ReturnType<typeof setTimeout> | null,
+ *   idleTimer: ReturnType<typeof setTimeout> | null,
+ *   idleTimeoutMs: number | null,
  *   lastAgentMessage: string,
  *   reviewText: string,
  *   reasoningSummary: string[],
@@ -319,6 +321,8 @@ function createTurnCaptureState(threadId, options = {}) {
     pendingCollaborations: new Set(),
     activeSubagentTurns: new Set(),
     completionTimer: null,
+    idleTimer: null,
+    idleTimeoutMs: Number.isFinite(options.idleTimeoutMs) && options.idleTimeoutMs > 0 ? options.idleTimeoutMs : null,
     lastAgentMessage: "",
     reviewText: "",
     reasoningSummary: [],
@@ -337,12 +341,45 @@ function clearCompletionTimer(state) {
   }
 }
 
+function clearIdleTimer(state) {
+  if (state.idleTimer) {
+    clearTimeout(state.idleTimer);
+    state.idleTimer = null;
+  }
+}
+
+function rejectTurn(state, error) {
+  if (state.completed) {
+    return;
+  }
+
+  clearCompletionTimer(state);
+  clearIdleTimer(state);
+  state.completed = true;
+  state.error = error;
+  state.rejectCompletion(error);
+}
+
+function scheduleIdleTimeout(state) {
+  if (state.completed || !state.idleTimeoutMs) {
+    return;
+  }
+
+  clearIdleTimer(state);
+  state.idleTimer = setTimeout(() => {
+    state.idleTimer = null;
+    rejectTurn(state, new Error(`Codex turn timed out after ${Math.ceil(state.idleTimeoutMs / 1000)}s without progress.`));
+  }, state.idleTimeoutMs);
+  state.idleTimer.unref?.();
+}
+
 function completeTurn(state, turn = null, options = {}) {
   if (state.completed) {
     return;
   }
 
   clearCompletionTimer(state);
+  clearIdleTimer(state);
   state.completed = true;
 
   if (turn) {
@@ -553,8 +590,17 @@ function applyTurnNotification(state, message) {
 async function captureTurn(client, threadId, startRequest, options = {}) {
   const state = createTurnCaptureState(threadId, options);
   const previousHandler = client.notificationHandler;
+  const disconnectPromise = client.exitPromise.then(() => {
+    const detail =
+      client.exitError ??
+      new Error("Codex app-server connection closed before the turn completed.");
+    state.error = detail;
+    throw detail;
+  });
+  scheduleIdleTimeout(state);
 
   client.setNotificationHandler((message) => {
+    scheduleIdleTimeout(state);
     if (!state.turnId) {
       state.bufferedNotifications.push(message);
       return;
@@ -577,6 +623,7 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
 
   try {
     const response = await startRequest();
+    scheduleIdleTimeout(state);
     options.onResponse?.(response, state);
     state.turnId = response.turn?.id ?? null;
     if (state.turnId) {
@@ -597,9 +644,10 @@ async function captureTurn(client, threadId, startRequest, options = {}) {
       completeTurn(state, response.turn);
     }
 
-    return await state.completion;
+    return await Promise.race([state.completion, disconnectPromise]);
   } finally {
     clearCompletionTimer(state);
+    clearIdleTimer(state);
     client.setNotificationHandler(previousHandler ?? null);
   }
 }
@@ -955,6 +1003,7 @@ export async function runAppServerReview(cwd, options = {}) {
         }),
       {
         onProgress: options.onProgress,
+        idleTimeoutMs: options.idleTimeoutMs,
         onResponse(response, state) {
           if (response.reviewThreadId) {
             state.threadIds.add(response.reviewThreadId);

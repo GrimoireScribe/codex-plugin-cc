@@ -66,6 +66,7 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
+const NATIVE_REVIEW_IDLE_TIMEOUT_MS = 60000;
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const REASONING_EFFORT_ALIASES = new Map([["minimal", "low"]]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
@@ -321,6 +322,23 @@ function buildAdversarialReviewPrompt(context, focusText) {
   });
 }
 
+function shouldFallbackToSelfCollect(error) {
+  const message = String(error?.message ?? error ?? "");
+  return (
+    /timed out after .* without progress/i.test(message) ||
+    /connection closed/i.test(message) ||
+    /EPIPE|ECONNRESET/i.test(message) ||
+    error?.code === "EPIPE" ||
+    error?.code === "ECONNRESET" ||
+    (error?.rpcCode === -32000 && /connection closed/i.test(message))
+  );
+}
+
+function buildFallbackFocusText(focusText, reason) {
+  const normalizedFocus = focusText?.trim() ? focusText.trim() : "No extra focus provided.";
+  return [`Native built-in review became unavailable: ${reason}`, normalizedFocus].join("\n\n");
+}
+
 function ensureCodexAvailable(cwd) {
   const availability = getCodexAvailability(cwd);
   if (!availability.available) {
@@ -439,43 +457,111 @@ async function executeReviewRun(request) {
   const reviewName = request.reviewName ?? "Review";
   if (reviewName === "Review") {
     const reviewTarget = validateNativeReviewRequest(target, focusText);
-    const result = await runAppServerReview(request.cwd, {
-      target: reviewTarget,
-      model: request.model,
-      onProgress: request.onProgress
-    });
-    const payload = {
-      review: reviewName,
-      target,
-      threadId: result.threadId,
-      sourceThreadId: result.sourceThreadId,
-      codex: {
-        status: result.status,
-        stderr: result.stderr,
-        stdout: result.reviewText,
-        reasoning: result.reasoningSummary
-      }
-    };
-    const rendered = renderNativeReviewResult(
-      {
-        status: result.status,
-        stdout: result.reviewText,
-        stderr: result.stderr
-      },
-      { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
-    );
+    try {
+      const result = await runAppServerReview(request.cwd, {
+        target: reviewTarget,
+        model: request.model,
+        onProgress: request.onProgress,
+        idleTimeoutMs: NATIVE_REVIEW_IDLE_TIMEOUT_MS
+      });
+      const payload = {
+        review: reviewName,
+        target,
+        threadId: result.threadId,
+        sourceThreadId: result.sourceThreadId,
+        codex: {
+          status: result.status,
+          stderr: result.stderr,
+          stdout: result.reviewText,
+          reasoning: result.reasoningSummary
+        }
+      };
+      const rendered = renderNativeReviewResult(
+        {
+          status: result.status,
+          stdout: result.reviewText,
+          stderr: result.stderr
+        },
+        { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
+      );
 
-    return {
-      exitStatus: result.status,
-      threadId: result.threadId,
-      turnId: result.turnId,
-      payload,
-      rendered,
-      summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
-      jobTitle: `Codex ${reviewName}`,
-      jobClass: "review",
-      targetLabel: target.label
-    };
+      return {
+        exitStatus: result.status,
+        threadId: result.threadId,
+        turnId: result.turnId,
+        payload,
+        rendered,
+        summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
+        jobTitle: `Codex ${reviewName}`,
+        jobClass: "review",
+        targetLabel: target.label
+      };
+    } catch (error) {
+      if (!shouldFallbackToSelfCollect(error)) {
+        throw error;
+      }
+
+      const detail = error instanceof Error ? error.message : String(error);
+      request.onProgress?.({
+        message: `Native review unavailable (${detail}). Falling back to self-collected review.`,
+        phase: "investigating"
+      });
+
+      const context = collectReviewContext(request.cwd, target);
+      const prompt = buildAdversarialReviewPrompt(context, buildFallbackFocusText(focusText, detail));
+      const result = await runAppServerTurn(context.repoRoot, {
+        prompt,
+        model: request.model,
+        sandbox: "read-only",
+        outputSchema: readOutputSchema(REVIEW_SCHEMA),
+        onProgress: request.onProgress
+      });
+      const parsed = parseStructuredOutput(result.finalMessage, {
+        status: result.status,
+        failureMessage: result.error?.message ?? result.stderr
+      });
+      const fallbackReviewLabel = "Review (self-collected fallback)";
+      const payload = {
+        review: reviewName,
+        target,
+        threadId: result.threadId,
+        context: {
+          repoRoot: context.repoRoot,
+          branch: context.branch,
+          summary: context.summary
+        },
+        nativeFallback: {
+          triggered: true,
+          reason: detail
+        },
+        codex: {
+          status: result.status,
+          stderr: result.stderr,
+          stdout: result.finalMessage,
+          reasoning: result.reasoningSummary
+        },
+        result: parsed.parsed,
+        rawOutput: parsed.rawOutput,
+        parseError: parsed.parseError,
+        reasoningSummary: result.reasoningSummary
+      };
+
+      return {
+        exitStatus: result.status,
+        threadId: result.threadId,
+        turnId: result.turnId,
+        payload,
+        rendered: renderReviewResult(parsed, {
+          reviewLabel: fallbackReviewLabel,
+          targetLabel: context.target.label,
+          reasoningSummary: result.reasoningSummary
+        }),
+        summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${fallbackReviewLabel} finished.`),
+        jobTitle: `Codex ${reviewName}`,
+        jobClass: "review",
+        targetLabel: context.target.label
+      };
+    }
   }
 
   const context = collectReviewContext(request.cwd, target);

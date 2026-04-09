@@ -70,6 +70,7 @@ async function main() {
   let activeStreamSocket = null;
   let activeStreamThreadIds = null;
   const sockets = new Set();
+  let shuttingDown = false;
 
   function clearSocketOwnership(socket) {
     if (activeRequestSocket === socket) {
@@ -98,9 +99,18 @@ async function main() {
     }
   }
 
-  async function shutdown(server) {
+  async function shutdown(server, options = {}) {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+
     for (const socket of sockets) {
-      socket.end();
+      if (options.abortConnections) {
+        socket.destroy();
+      } else {
+        socket.end();
+      }
     }
     await appClient.close().catch(() => {});
     await new Promise((resolve) => server.close(resolve));
@@ -113,6 +123,13 @@ async function main() {
   }
 
   appClient.setNotificationHandler(routeNotification);
+  appClient.exitPromise.then(async () => {
+    if (shuttingDown) {
+      return;
+    }
+    await shutdown(server, { abortConnections: true });
+    process.exit(appClient.exitError ? 1 : 0);
+  });
 
   const server = net.createServer((socket) => {
     sockets.add(socket);

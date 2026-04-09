@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.3-grimoire.3
+
+- Fail fast when the shared broker loses its upstream Codex app-server so review/task runs surface an error instead of hanging on an orphaned socket.
+- Add a 60-second JSON-RPC request timeout for app-server startup/control calls so broker setup and turn/review start requests cannot block forever.
+
 ## 1.0.3-grimoire.2
 
 - Restore Windows Codex CLI availability checks by allowing shell-based resolution only for the `codex` preflight probes.
