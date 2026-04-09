@@ -251,7 +251,10 @@ function firstMeaningfulLine(text, fallback) {
 async function buildSetupReport(cwd, actionsTaken = []) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const nodeStatus = binaryAvailable("node", ["--version"], { cwd });
-  const npmStatus = binaryAvailable("npm", ["--version"], { cwd });
+  const npmStatus = binaryAvailable("npm", ["--version"], {
+    cwd,
+    shell: process.platform === "win32"
+  });
   const codexStatus = getCodexAvailability(cwd);
   const authStatus = await getCodexAuthStatus(cwd);
   const config = getConfig(workspaceRoot);
