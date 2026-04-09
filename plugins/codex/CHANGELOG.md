@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.3-grimoire.4
+
+- Add a new MCP-capable review path exposed as `review-mcp` in the companion runtime and packaged slash commands.
+- Keep native `/codex:review` unchanged while allowing a separate self-collected review flow that can use MCP tools when available.
+
 ## 1.0.3-grimoire.3
 
 - Fail fast when the shared broker loses its upstream Codex app-server so review/task runs surface an error instead of hanging on an orphaned socket.

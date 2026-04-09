@@ -149,6 +149,7 @@ function printUsage() {
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
+      "  node scripts/codex-companion.mjs review-mcp [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
@@ -315,6 +316,16 @@ function buildAdversarialReviewPrompt(context, focusText) {
   const template = loadPromptTemplate(ROOT_DIR, "adversarial-review");
   return interpolateTemplate(template, {
     REVIEW_KIND: "Adversarial Review",
+    TARGET_LABEL: context.target.label,
+    USER_FOCUS: focusText || "No extra focus provided.",
+    REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
+    REVIEW_INPUT: context.content
+  });
+}
+
+function buildMcpReviewPrompt(context, focusText) {
+  const template = loadPromptTemplate(ROOT_DIR, "review-mcp");
+  return interpolateTemplate(template, {
     TARGET_LABEL: context.target.label,
     USER_FOCUS: focusText || "No extra focus provided.",
     REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
@@ -565,7 +576,10 @@ async function executeReviewRun(request) {
   }
 
   const context = collectReviewContext(request.cwd, target);
-  const prompt = buildAdversarialReviewPrompt(context, focusText);
+  const prompt =
+    reviewName === "MCP Review"
+      ? buildMcpReviewPrompt(context, focusText)
+      : buildAdversarialReviewPrompt(context, focusText);
   const result = await runAppServerTurn(context.repoRoot, {
     prompt,
     model: request.model,
@@ -694,8 +708,8 @@ async function executeTaskRun(request) {
 
 function buildReviewJobMetadata(reviewName, target) {
   return {
-    kind: reviewName === "Adversarial Review" ? "adversarial-review" : "review",
-    title: reviewName === "Review" ? "Codex Review" : `Codex ${reviewName}`,
+    kind: reviewName === "Adversarial Review" ? "adversarial-review" : reviewName === "MCP Review" ? "review-mcp" : "review",
+    title: reviewName === "Review" ? "Codex Review" : reviewName === "MCP Review" ? "Codex MCP Review" : `Codex ${reviewName}`,
     summary: `${reviewName} ${target.label}`
   };
 }
@@ -1157,6 +1171,11 @@ async function main() {
       break;
     case "review":
       await handleReview(argv);
+      break;
+    case "review-mcp":
+      await handleReviewCommand(argv, {
+        reviewName: "MCP Review"
+      });
       break;
     case "adversarial-review":
       await handleReviewCommand(argv, {
