@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3-grimoire.5
+
+- Propagate `idleTimeoutMs` into the `runAppServerTurn` capture path so MCP review, adversarial review, rescue, and task runs inherit the same per-turn idle watchdog as native review.
+
 ## 1.0.3-grimoire.4
 
 - Add a new MCP-capable review path exposed as `review-mcp` in the companion runtime and packaged slash commands.

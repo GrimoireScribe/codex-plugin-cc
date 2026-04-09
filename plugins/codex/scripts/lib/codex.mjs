@@ -1077,7 +1077,7 @@ export async function runAppServerTurn(cwd, options = {}) {
           effort: options.effort ?? null,
           outputSchema: options.outputSchema ?? null
         }),
-      { onProgress: options.onProgress }
+      { onProgress: options.onProgress, idleTimeoutMs: options.idleTimeoutMs }
     );
 
     return {
