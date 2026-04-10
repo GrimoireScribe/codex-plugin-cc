@@ -1,6 +1,6 @@
 ---
 description: Run an MCP-capable Codex review against local git state
-argument-hint: '[--wait|--background] [--base <ref>] [--scope auto|working-tree|branch]'
+argument-hint: '[--wait|--background] [--model <model|spark>] [--base <ref>] [--scope auto|working-tree|branch]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---

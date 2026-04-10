@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3-grimoire.6
+
+- Expose `--model <model|spark>` on review slash-command surfaces: `/codex:review`, `/codex:review:mcp`, `/codex:review-mcp`, and `/codex:adversarial-review`.
+
 ## 1.0.3-grimoire.5
 
 - Propagate `idleTimeoutMs` into the `runAppServerTurn` capture path so MCP review, adversarial review, rescue, and task runs inherit the same per-turn idle watchdog as native review.
