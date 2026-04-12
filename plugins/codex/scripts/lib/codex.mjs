@@ -1319,6 +1319,8 @@ export async function runCodexExecTask(cwd, options = {}) {
   let stdoutRemainder = "";
   let idleTimer = null;
   let timedOut = false;
+  let finalizationTimer = null;
+  let finalizedAfterMessage = false;
 
   const resetIdleTimer = () => {
     if (!options.idleTimeoutMs) {
@@ -1333,12 +1335,23 @@ export async function runCodexExecTask(cwd, options = {}) {
     }, options.idleTimeoutMs);
   };
 
+  const clearFinalizationTimer = () => {
+    if (finalizationTimer) {
+      clearTimeout(finalizationTimer);
+      finalizationTimer = null;
+    }
+  };
+
+  const scheduleFinalizationTimer = () => {
+    clearFinalizationTimer();
+    finalizationTimer = setTimeout(() => {
+      finalizedAfterMessage = true;
+      child.kill();
+    }, 5000);
+  };
+
   /** @type {string[]} */
-  const args = ["exec"];
-  if (options.resumeThreadId) {
-    args.push("resume", options.resumeThreadId);
-  }
-  args.push("--cd", cwd, "--skip-git-repo-check", "--json", "--output-last-message", outputPath);
+  const args = ["exec", "--cd", cwd, "--skip-git-repo-check", "--json", "--output-last-message", outputPath];
   if (schemaPath) {
     args.push("--output-schema", schemaPath);
   }
@@ -1349,6 +1362,9 @@ export async function runCodexExecTask(cwd, options = {}) {
     pushExecConfig(args, "model_reasoning_effort", options.effort);
   }
   args.push("--dangerously-bypass-approvals-and-sandbox");
+  if (options.resumeThreadId) {
+    args.push("resume", options.resumeThreadId);
+  }
   if (typeof options.prompt === "string") {
     args.push("-");
   }
@@ -1400,6 +1416,7 @@ export async function runCodexExecTask(cwd, options = {}) {
           if (itemType === "agent_message" && typeof item.text === "string") {
             finalMessage = item.text;
             emitProgress(options.onProgress, "Assistant produced a final message.", "finalizing");
+            scheduleFinalizationTimer();
             break;
           }
           if (itemType === "command_execution") {
@@ -1456,8 +1473,13 @@ export async function runCodexExecTask(cwd, options = {}) {
       if (idleTimer) {
         clearTimeout(idleTimer);
       }
+      clearFinalizationTimer();
       if (stdoutRemainder.trim()) {
         processStdoutChunk("\n");
+      }
+      if (finalizedAfterMessage && finalMessage.trim()) {
+        resolve(0);
+        return;
       }
       if (timedOut && options.idleTimeoutMs) {
         reject(new Error(`Codex turn timed out after ${Math.ceil(options.idleTimeoutMs / 1000)}s without progress.`));
