@@ -1,15 +1,33 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
+function quoteShellArg(value) {
+  const text = String(value ?? "");
+  if (!text) {
+    return process.platform === "win32" ? "\"\"" : "''";
+  }
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(text)) {
+    return text;
+  }
+  if (process.platform === "win32") {
+    return `"${text.replace(/"/g, "\"\"")}"`;
+  }
+  return `'${text.replace(/'/g, `'\"'\"'`)}'`;
+}
+
 export function runCommand(command, args = [], options = {}) {
-  const result = spawnSync(command, args, {
+  const shell = options.shell ?? false;
+  const spawnCommand =
+    shell && args.length > 0 ? [command, ...args].map((part) => quoteShellArg(part)).join(" ") : command;
+  const spawnArgs = shell && args.length > 0 ? [] : args;
+  const result = spawnSync(spawnCommand, spawnArgs, {
     cwd: options.cwd,
     env: options.env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: options.maxBuffer,
     stdio: options.stdio ?? "pipe",
-    shell: options.shell ?? false,
+    shell,
     windowsHide: true
   });
 

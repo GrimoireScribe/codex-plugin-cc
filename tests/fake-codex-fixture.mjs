@@ -231,6 +231,119 @@ function taskPayload(prompt, resume) {
   return "Handled the requested task.\\nTask prompt accepted.";
 }
 
+function writeLastMessageFile(filePath, text) {
+  if (!filePath) {
+    return;
+  }
+  fs.writeFileSync(filePath, text, "utf8");
+}
+
+function emitExecEvent(message) {
+  process.stdout.write(JSON.stringify(message) + "\\n");
+}
+
+function handleExec(args) {
+  const state = loadState();
+  let index = 1;
+  let resume = false;
+  let resumeThreadId = null;
+  let model = null;
+  let effort = null;
+  let outputLastMessage = null;
+  let outputSchemaPath = null;
+  let dangerousBypass = false;
+
+  if (args[index] === "resume") {
+    resume = true;
+    index += 1;
+  }
+
+  while (index < args.length) {
+    const token = args[index];
+    if (token === "--help") {
+      console.log("fake exec help");
+      process.exit(0);
+    }
+    if (token === "--dangerously-bypass-approvals-and-sandbox") {
+      dangerousBypass = true;
+      index += 1;
+      continue;
+    }
+    if (token === "--model") {
+      model = args[index + 1] ?? null;
+      index += 2;
+      continue;
+    }
+    if (token === "-c") {
+      const configValue = args[index + 1] ?? "";
+      const match = /^model_reasoning_effort=(.+)$/.exec(configValue);
+      if (match) {
+        try {
+          effort = JSON.parse(match[1]);
+        } catch {
+          effort = match[1];
+        }
+      }
+      index += 2;
+      continue;
+    }
+    if (token === "--output-last-message") {
+      outputLastMessage = args[index + 1] ?? null;
+      index += 2;
+      continue;
+    }
+    if (token === "--output-schema") {
+      outputSchemaPath = args[index + 1] ?? null;
+      index += 2;
+      continue;
+    }
+    if (token === "--cd" || token === "--skip-git-repo-check" || token === "--json") {
+      index += token === "--cd" ? 2 : 1;
+      continue;
+    }
+    break;
+  }
+
+  if (resume) {
+    resumeThreadId = args[index] ?? null;
+    index += 1;
+  }
+
+  let prompt = args.slice(index).join(" ").trim();
+  if (prompt === "-") {
+    prompt = fs.readFileSync(0, "utf8").trim();
+  }
+  const threadId = resumeThreadId || "thr_" + state.nextThreadId++;
+  const turnId = "turn_" + state.nextTurnId++;
+  const payload = outputSchemaPath ? structuredReviewPayload(prompt) : taskPayload(prompt, resume);
+
+  state.lastTurnStart = {
+    threadId,
+    turnId,
+    model,
+    effort,
+    prompt
+  };
+  state.lastExec = {
+    args,
+    dangerousBypass,
+    outputLastMessage
+  };
+  saveState(state);
+
+  if (BEHAVIOR === "stalled-task") {
+    setInterval(() => {}, 60000);
+    return false;
+  }
+
+  emitExecEvent({ type: "thread.started", thread_id: threadId });
+  emitExecEvent({ type: "turn.started", turn_id: turnId });
+  emitExecEvent({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: payload } });
+  emitExecEvent({ type: "turn.completed" });
+  writeLastMessageFile(outputLastMessage, payload);
+  process.exit(0);
+}
+
 function buildTaskRuntimeFailureItems(turnId) {
   return [
     {
@@ -267,6 +380,10 @@ if (args[0] === "--version") {
   console.log("codex-cli test");
   process.exit(0);
 }
+if (args[0] === "exec" && args[1] === "--help") {
+  console.log("fake exec help");
+  process.exit(0);
+}
 if (args[0] === "app-server" && args[1] === "--help") {
   console.log("fake app-server help");
   process.exit(0);
@@ -282,7 +399,11 @@ if (args[0] === "login" && args[1] === "status") {
 if (args[0] === "login") {
   process.exit(0);
 }
-if (args[0] !== "app-server") {
+if (args[0] === "exec") {
+  if (handleExec(args) !== false) {
+    process.exit(0);
+  }
+} else if (args[0] !== "app-server") {
   process.exit(1);
 }
 const bootState = loadState();

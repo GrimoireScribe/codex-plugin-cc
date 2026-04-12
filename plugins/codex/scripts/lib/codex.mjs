@@ -39,6 +39,10 @@
  * }} TurnCaptureState
  */
 import { readJsonFile } from "./fs.mjs";
+import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
 import { binaryAvailable } from "./process.mjs";
@@ -47,6 +51,132 @@ const SERVICE_NAME = "claude_code_codex_plugin";
 const TASK_THREAD_PREFIX = "Codex Companion Task";
 const DEFAULT_CONTINUE_PROMPT =
   "Continue from the current thread state. Pick the next highest-value step and follow through until the task is resolved.";
+
+function buildExecTempPath(kind) {
+  return path.join(os.tmpdir(), `codex-companion-${kind}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
+}
+
+function pushExecConfig(args, key, value) {
+  args.push("-c", `${key}=${JSON.stringify(value)}`);
+}
+
+function normalizeExecItemType(type) {
+  return String(type ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+}
+
+function parseExecEvent(line) {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+
+function collectExecFailure(toolCalls, formatter) {
+  return (toolCalls ?? [])
+    .filter((item) => String(item?.status ?? "").trim().toLowerCase() === "failed")
+    .map((item) => ({
+      label: formatter(item),
+      status: item.status
+    }));
+}
+
+function writeTempJsonFile(prefix, value) {
+  const filePath = buildExecTempPath(prefix);
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  return filePath;
+}
+
+function resolveCodexSpawnTarget(env = process.env) {
+  if (process.platform !== "win32") {
+    return { command: "codex", shell: false, preArgs: [] };
+  }
+
+  const windowsPath = env.PATH ?? env.Path ?? env.path ?? "";
+  const pathEntries = String(windowsPath)
+    .split(path.delimiter)
+    .filter(Boolean);
+
+  for (const entry of pathEntries) {
+    const cmdPath = path.join(entry, "codex.cmd");
+    if (fs.existsSync(cmdPath)) {
+      const baseDir = path.dirname(cmdPath);
+      const jsEntry = path.join(baseDir, "node_modules", "@openai", "codex", "bin", "codex.js");
+      if (fs.existsSync(jsEntry)) {
+        const bundledNode = path.join(baseDir, "node.exe");
+        return {
+          command: fs.existsSync(bundledNode) ? bundledNode : process.execPath,
+          shell: false,
+          preArgs: [jsEntry]
+        };
+      }
+    }
+
+    const barePath = path.join(entry, "codex");
+    if (fs.existsSync(barePath)) {
+      return {
+        command: process.execPath,
+        shell: false,
+        preArgs: [barePath]
+      };
+    }
+  }
+
+  const whereResult = spawnSync("where.exe", ["codex"], {
+    env,
+    encoding: "utf8",
+    windowsHide: true
+  });
+  const discoveredEntries =
+    whereResult.status === 0
+      ? String(whereResult.stdout ?? "")
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+      : [];
+
+  for (const discoveredPath of discoveredEntries) {
+    if (/codex\.cmd$/i.test(discoveredPath)) {
+      const baseDir = path.dirname(discoveredPath);
+      const jsEntry = path.join(baseDir, "node_modules", "@openai", "codex", "bin", "codex.js");
+      if (fs.existsSync(jsEntry)) {
+        const bundledNode = path.join(baseDir, "node.exe");
+        return {
+          command: fs.existsSync(bundledNode) ? bundledNode : process.execPath,
+          shell: false,
+          preArgs: [jsEntry]
+        };
+      }
+    }
+    if (/([\\\/]|^)codex$/i.test(discoveredPath) && fs.existsSync(discoveredPath)) {
+      return {
+        command: process.execPath,
+        shell: false,
+        preArgs: [discoveredPath]
+      };
+    }
+  }
+
+  const appData = env.APPDATA ?? process.env.APPDATA ?? null;
+  if (appData) {
+    const npmDir = path.join(appData, "npm");
+    const cmdPath = path.join(npmDir, "codex.cmd");
+    const jsEntry = path.join(npmDir, "node_modules", "@openai", "codex", "bin", "codex.js");
+    if (fs.existsSync(cmdPath) && fs.existsSync(jsEntry)) {
+      const bundledNode = path.join(npmDir, "node.exe");
+      return {
+        command: fs.existsSync(bundledNode) ? bundledNode : process.execPath,
+        shell: false,
+        preArgs: [jsEntry]
+      };
+    }
+  }
+
+  return { command: "codex", shell: true, preArgs: [] };
+}
 
 function cleanCodexStderr(stderr) {
   return stderr
@@ -974,6 +1104,32 @@ export async function getCodexAuthStatus(cwd, options = {}) {
   }
 }
 
+export function getCodexExecAvailability(cwd) {
+  const versionStatus = binaryAvailable("codex", ["--version"], {
+    cwd,
+    shell: process.platform === "win32"
+  });
+  if (!versionStatus.available) {
+    return versionStatus;
+  }
+
+  const execStatus = binaryAvailable("codex", ["exec", "--help"], {
+    cwd,
+    shell: process.platform === "win32"
+  });
+  if (!execStatus.available) {
+    return {
+      available: false,
+      detail: `${versionStatus.detail}; exec runtime unavailable: ${execStatus.detail}`
+    };
+  }
+
+  return {
+    available: true,
+    detail: `${versionStatus.detail}; exec runtime available`
+  };
+}
+
 export async function interruptAppServerTurn(cwd, { threadId, turnId }) {
   if (!threadId || !turnId) {
     return {
@@ -1143,6 +1299,200 @@ export async function runAppServerTurn(cwd, options = {}) {
       dynamicToolFailures: summarizeToolFailures(turnState.dynamicToolCalls, (item) => item.tool ?? "unknown tool")
     };
   });
+}
+
+export async function runCodexExecTask(cwd, options = {}) {
+  const availability = getCodexExecAvailability(cwd);
+  if (!availability.available) {
+    throw new Error("Codex CLI is not installed or is missing required exec runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
+  }
+
+  const outputPath = buildExecTempPath("last-message");
+  const schemaPath = options.outputSchema ? writeTempJsonFile("output-schema", options.outputSchema) : null;
+  const commandFailures = [];
+  const mcpToolCalls = [];
+  const dynamicToolCalls = [];
+  let finalMessage = "";
+  let threadId = null;
+  let turnId = null;
+  let stderr = "";
+  let stdoutRemainder = "";
+  let idleTimer = null;
+  let timedOut = false;
+
+  const resetIdleTimer = () => {
+    if (!options.idleTimeoutMs) {
+      return;
+    }
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+    }
+    idleTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, options.idleTimeoutMs);
+  };
+
+  /** @type {string[]} */
+  const args = ["exec"];
+  if (options.resumeThreadId) {
+    args.push("resume", options.resumeThreadId);
+  }
+  args.push("--cd", cwd, "--skip-git-repo-check", "--json", "--output-last-message", outputPath);
+  if (schemaPath) {
+    args.push("--output-schema", schemaPath);
+  }
+  if (options.model) {
+    args.push("--model", options.model);
+  }
+  if (options.effort) {
+    pushExecConfig(args, "model_reasoning_effort", options.effort);
+  }
+  args.push("--dangerously-bypass-approvals-and-sandbox");
+  if (typeof options.prompt === "string") {
+    args.push("-");
+  }
+
+  emitProgress(options.onProgress, "Starting Codex exec task.", "starting");
+
+  const spawnTarget = resolveCodexSpawnTarget(options.env ?? process.env);
+  const child = spawn(spawnTarget.command, [...spawnTarget.preArgs, ...args], {
+    cwd,
+    env: options.env ?? process.env,
+    shell: spawnTarget.shell,
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  resetIdleTimer();
+
+  const processStdoutChunk = (chunk) => {
+    resetIdleTimer();
+    stdoutRemainder += chunk;
+    const lines = stdoutRemainder.split(/\r?\n/);
+    stdoutRemainder = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+      const event = parseExecEvent(trimmed);
+      if (!event) {
+        continue;
+      }
+
+      switch (event.type) {
+        case "thread.started":
+          threadId = event.thread_id ?? threadId;
+          emitProgress(options.onProgress, threadId ? `Thread ready (${threadId}).` : "Thread ready.", "starting", {
+            threadId: threadId ?? null
+          });
+          break;
+        case "turn.started":
+          turnId = event.turn_id ?? turnId;
+          emitProgress(options.onProgress, "Turn started.", "starting", {
+            threadId: threadId ?? null,
+            turnId: turnId ?? null
+          });
+          break;
+        case "item.completed": {
+          const item = event.item ?? {};
+          const itemType = normalizeExecItemType(item.type);
+          if (itemType === "agent_message" && typeof item.text === "string") {
+            finalMessage = item.text;
+            emitProgress(options.onProgress, "Assistant produced a final message.", "finalizing");
+            break;
+          }
+          if (itemType === "command_execution") {
+            if (String(item.status ?? "").trim().toLowerCase() === "failed") {
+              commandFailures.push({
+                command: item.command ?? "",
+                status: item.status ?? "failed",
+                exitCode: item.exit_code ?? item.exitCode ?? null
+              });
+            }
+            break;
+          }
+          if (itemType === "mcp_tool_call") {
+            mcpToolCalls.push(item);
+            break;
+          }
+          if (itemType === "dynamic_tool_call") {
+            dynamicToolCalls.push(item);
+          }
+          break;
+        }
+        case "turn.completed":
+          emitProgress(options.onProgress, "Turn completed.", "finalizing", {
+            threadId: threadId ?? null,
+            turnId: turnId ?? null
+          });
+          break;
+        case "error":
+          if (event.message) {
+            stderr = `${stderr}${stderr ? "\n" : ""}${event.message}`;
+          }
+          emitProgress(options.onProgress, `Codex error: ${event.message ?? "unknown exec error"}`, "failed");
+          break;
+        default:
+          break;
+      }
+    }
+  };
+
+  const exitStatus = await new Promise((resolve, reject) => {
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    if (typeof options.prompt === "string" && child.stdin) {
+      child.stdin.write(options.prompt);
+      child.stdin.end();
+    }
+    child.stdout?.on("data", processStdoutChunk);
+    child.stderr?.on("data", (chunk) => {
+      resetIdleTimer();
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      if (stdoutRemainder.trim()) {
+        processStdoutChunk("\n");
+      }
+      if (timedOut && options.idleTimeoutMs) {
+        reject(new Error(`Codex turn timed out after ${Math.ceil(options.idleTimeoutMs / 1000)}s without progress.`));
+        return;
+      }
+      resolve(code ?? 1);
+    });
+  });
+
+  const cleanedStderr = cleanCodexStderr(stderr);
+  try {
+    if (fs.existsSync(outputPath)) {
+      finalMessage = fs.readFileSync(outputPath, "utf8");
+    }
+  } finally {
+    if (fs.existsSync(outputPath)) {
+      fs.unlinkSync(outputPath);
+    }
+    if (schemaPath && fs.existsSync(schemaPath)) {
+      fs.unlinkSync(schemaPath);
+    }
+  }
+
+  return {
+    status: exitStatus,
+    threadId,
+    turnId,
+    finalMessage,
+    stderr: cleanedStderr,
+    touchedFiles: [],
+    reasoningSummary: [],
+    commandFailures,
+    mcpToolFailures: collectExecFailure(mcpToolCalls, (item) => `${item.server ?? "unknown"}/${item.tool ?? "unknown"}`),
+    dynamicToolFailures: collectExecFailure(dynamicToolCalls, (item) => item.tool ?? "unknown tool")
+  };
 }
 
 export async function findLatestTaskThread(cwd) {

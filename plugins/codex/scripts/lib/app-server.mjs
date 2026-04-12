@@ -220,11 +220,15 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    this.proc = spawn("codex", ["app-server"], {
+    const env = this.options.env ?? process.env;
+    const spawnCommand = process.platform === "win32" ? env.ComSpec ?? env.COMSPEC ?? "cmd.exe" : "codex";
+    const spawnArgs = process.platform === "win32" ? ["/d", "/s", "/c", "codex app-server"] : ["app-server"];
+
+    this.proc = spawn(spawnCommand, spawnArgs, {
       cwd: this.cwd,
-      env: this.options.env ?? process.env,
+      env,
       stdio: ["pipe", "pipe", "pipe"],
-      shell: process.platform === "win32" ? (process.env.SHELL || true) : false,
+      shell: false,
       windowsHide: true
     });
 

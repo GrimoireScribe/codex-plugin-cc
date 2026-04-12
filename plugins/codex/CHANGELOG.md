@@ -5,6 +5,12 @@
 - Make `/codex:review` the default MCP-capable self-collected standard review path.
 - Remove the separate `/codex:review:mcp` and `/codex:review-mcp` command surfaces.
 
+## 1.0.3-grimoire.10
+
+- Move `/codex:review`, `/codex:adversarial-review`, and rescue/task execution onto direct `codex exec` so MCP-capable flows no longer depend on the older app-server review path.
+- Add Windows Codex CLI resolution fallbacks for direct exec launches and send prompts over stdin/output-schema temp files to avoid shell quoting and long-argv failures.
+- Harden stale background job reconciliation by rewriting dead queued/running job records to failed state instead of leaving stale process metadata behind.
+
 ## 1.0.3-grimoire.6
 
 - Expose `--model <model|spark>` on the then-current review slash-command surfaces before the MCP aliases were later folded into `/codex:review`.

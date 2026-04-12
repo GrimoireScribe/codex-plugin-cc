@@ -5,7 +5,7 @@ disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 
-Run a Codex review through the shared plugin runtime using `turn/start`, so MCP tools can be used when available.
+Run a Codex review through the shared plugin runtime using direct `codex exec`, so MCP tools can be used when available.
 
 Raw slash-command arguments:
 `$ARGUMENTS`

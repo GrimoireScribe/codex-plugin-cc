@@ -86,7 +86,7 @@ function pruneJobs(jobs) {
     .slice(0, MAX_JOBS);
 }
 
-function reconcileActiveJobs(jobs) {
+function reconcileActiveJobs(cwd, jobs) {
   let changed = false;
   const completedAt = nowIso();
   const nextJobs = jobs.map((job) => {
@@ -100,7 +100,7 @@ function reconcileActiveJobs(jobs) {
     }
 
     changed = true;
-    return {
+    const reconciled = {
       ...job,
       status: "failed",
       phase: "failed",
@@ -108,6 +108,29 @@ function reconcileActiveJobs(jobs) {
       completedAt,
       errorMessage: job.errorMessage ?? "Background Codex job ended unexpectedly before updating its final state."
     };
+
+    const jobFile = resolveJobFile(cwd, job.id);
+    if (fs.existsSync(jobFile)) {
+      try {
+        const storedJob = readJobFile(jobFile);
+        writeJobFile(cwd, job.id, {
+          ...storedJob,
+          ...reconciled
+        });
+      } catch {
+        writeJobFile(cwd, job.id, reconciled);
+      }
+    }
+
+    if (job.logFile) {
+      fs.appendFileSync(
+        job.logFile,
+        `[${completedAt}] Marked stale background job as failed after PID ${job.pid ?? "unknown"} was not running.\n`,
+        "utf8"
+      );
+    }
+
+    return reconciled;
   });
 
   return { changed, jobs: nextJobs };
@@ -224,7 +247,7 @@ export function upsertJob(cwd, jobPatch) {
 
 export function listJobs(cwd) {
   const state = loadState(cwd);
-  const reconciled = reconcileActiveJobs(state.jobs);
+  const reconciled = reconcileActiveJobs(cwd, state.jobs);
   if (!reconciled.changed) {
     return state.jobs;
   }

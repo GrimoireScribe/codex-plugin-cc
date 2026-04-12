@@ -8,16 +8,16 @@ import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import {
-    buildPersistentTaskThreadName,
     DEFAULT_CONTINUE_PROMPT,
     findLatestTaskThread,
+    getCodexExecAvailability,
     getCodexAuthStatus,
     getCodexAvailability,
     getSessionRuntimeStatus,
     interruptAppServerTurn,
     parseStructuredOutput,
     readOutputSchema,
-    runAppServerTurn
+    runCodexExecTask
   } from "./lib/codex.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
@@ -65,6 +65,7 @@ const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json"
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const TASK_IDLE_TIMEOUT_MS = readPositiveEnvInt("CODEX_TASK_IDLE_TIMEOUT_MS", 180000);
+const MAX_CODEX_EXEC_PROMPT_CHARS = readPositiveEnvInt("CODEX_MAX_PROMPT_CHARS", 900000);
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const REASONING_EFFORT_ALIASES = new Map([["minimal", "low"]]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
@@ -187,17 +188,6 @@ function buildWriteTaskPrompt(prompt) {
     ...buildPlatformCommandGuidance(),
     "",
     "Apply the user's request with those platform constraints in mind."
-  ].join("\n");
-}
-
-function buildGraphToolFallbackPrompt(prompt, reason) {
-  return [
-    "Graph/MCP tools are currently unavailable or unstable for this run.",
-    "Do not call MCP or graph tools in this attempt.",
-    "Use read-only git diff, rg, and file reads only.",
-    `Failure trigger: ${reason}`,
-    "",
-    prompt
   ].join("\n");
 }
 
@@ -390,18 +380,6 @@ function buildMcpReviewPrompt(context, focusText) {
   });
 }
 
-function shouldFallbackToSelfCollect(error) {
-  const message = String(error?.message ?? error ?? "");
-  return (
-    /timed out after .* without progress/i.test(message) ||
-    /connection closed/i.test(message) ||
-    /EPIPE|ECONNRESET/i.test(message) ||
-    error?.code === "EPIPE" ||
-    error?.code === "ECONNRESET" ||
-    (error?.rpcCode === -32000 && /connection closed/i.test(message))
-  );
-}
-
 function buildFallbackFocusText(focusText, reason) {
   const normalizedFocus = focusText?.trim() ? focusText.trim() : "No extra focus provided.";
   return [`Native built-in review became unavailable: ${reason}`, normalizedFocus].join("\n\n");
@@ -411,6 +389,13 @@ function ensureCodexAvailable(cwd) {
   const availability = getCodexAvailability(cwd);
   if (!availability.available) {
     throw new Error("Codex CLI is not installed or is missing required runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
+  }
+}
+
+function ensureCodexTaskAvailable(cwd) {
+  const availability = getCodexExecAvailability(cwd);
+  if (!availability.available) {
+    throw new Error("Codex CLI is not installed or is missing required exec runtime support. Install it with `npm install -g @openai/codex`, then rerun `/codex:setup`.");
   }
 }
 
@@ -495,7 +480,7 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
 }
 
 async function executeReviewRun(request) {
-  ensureCodexAvailable(request.cwd);
+  ensureCodexTaskAvailable(request.cwd);
   ensureGitRepository(request.cwd);
 
   const target = resolveReviewTarget(request.cwd, {
@@ -504,34 +489,31 @@ async function executeReviewRun(request) {
   });
   const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
-  const context = collectReviewContext(request.cwd, target);
-  const prompt =
+  let context = collectReviewContext(request.cwd, target);
+  let prompt =
     reviewName === "Review" || reviewName === "MCP Review"
       ? buildMcpReviewPrompt(context, focusText)
       : buildAdversarialReviewPrompt(context, focusText);
-  let result;
-  try {
-    result = await runAppServerTurn(context.repoRoot, {
-      prompt,
-      model: request.model,
-      sandbox: "read-only",
-      outputSchema: readOutputSchema(REVIEW_SCHEMA),
-      onProgress: request.onProgress
+
+  if (prompt.length > MAX_CODEX_EXEC_PROMPT_CHARS && context.inputMode !== "self-collect") {
+    request.onProgress?.(
+      `Review context is too large for one Codex exec prompt (${prompt.length} chars). Retrying with lightweight self-collected context.`
+    );
+    context = collectReviewContext(request.cwd, target, {
+      includeDiff: false,
+      includeUntrackedContents: false
     });
-  } catch (error) {
-    if (!shouldFallbackToSelfCollect(error)) {
-      throw error;
-    }
-    const fallbackReason = error instanceof Error ? error.message : String(error);
-    request.onProgress?.(`Graph/MCP path failed, retrying with self-collected review only: ${fallbackReason}`);
-    result = await runAppServerTurn(context.repoRoot, {
-      prompt: buildGraphToolFallbackPrompt(prompt, fallbackReason),
-      model: request.model,
-      sandbox: "read-only",
-      outputSchema: readOutputSchema(REVIEW_SCHEMA),
-      onProgress: request.onProgress
-    });
+    prompt =
+      reviewName === "Review" || reviewName === "MCP Review"
+        ? buildMcpReviewPrompt(context, focusText)
+        : buildAdversarialReviewPrompt(context, focusText);
   }
+  const result = await runCodexExecTask(context.repoRoot, {
+    prompt,
+    model: request.model,
+    outputSchema: readOutputSchema(REVIEW_SCHEMA),
+    onProgress: request.onProgress
+  });
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
     failureMessage: result.error?.message ?? result.stderr
@@ -579,7 +561,7 @@ async function executeReviewRun(request) {
 
 async function executeTaskRun(request) {
   const workspaceRoot = resolveWorkspaceRoot(request.cwd);
-  ensureCodexAvailable(request.cwd);
+  ensureCodexTaskAvailable(request.cwd);
 
   const taskMetadata = buildTaskRunMetadata({
     prompt: request.prompt,
@@ -608,17 +590,13 @@ async function executeTaskRun(request) {
     ? buildWriteTaskPrompt(request.prompt)
     : buildReadOnlyInvestigationPrompt(request.prompt);
 
-  const result = await runAppServerTurn(workspaceRoot, {
+  const result = await runCodexExecTask(workspaceRoot, {
     resumeThreadId,
-    prompt: taskPrompt,
-    defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
+    prompt: taskPrompt || (resumeThreadId ? DEFAULT_CONTINUE_PROMPT : ""),
     model: request.model,
     effort: request.effort,
-    sandbox: request.write ? "workspace-write" : "read-only",
     onProgress: request.onProgress,
-    idleTimeoutMs: request.write ? TASK_IDLE_TIMEOUT_MS : null,
-    persistThread: true,
-    threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
+    idleTimeoutMs: TASK_IDLE_TIMEOUT_MS
   });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
@@ -894,7 +872,7 @@ async function handleTask(argv) {
   });
 
   if (options.background) {
-    ensureCodexAvailable(cwd);
+    ensureCodexTaskAvailable(cwd);
     requireTaskRequest(prompt, resumeLast);
 
     const job = buildTaskJob(workspaceRoot, taskMetadata, write);
