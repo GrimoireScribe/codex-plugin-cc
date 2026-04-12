@@ -313,13 +313,38 @@ export function renderNativeReviewResult(result, meta) {
 }
 
 export function renderTaskResult(parsedResult, meta) {
+  const diagnostics = [];
+  if (meta?.sandboxMode) {
+    diagnostics.push(`Sandbox: ${meta.sandboxMode}`);
+  }
+  if (Array.isArray(meta?.mcpToolFailures) && meta.mcpToolFailures.length > 0) {
+    diagnostics.push(
+      `MCP tool failures: ${meta.mcpToolFailures.map((item) => `${item.label} (${item.status})`).join(", ")}`
+    );
+  }
+  if (Array.isArray(meta?.dynamicToolFailures) && meta.dynamicToolFailures.length > 0) {
+    diagnostics.push(
+      `Tool failures: ${meta.dynamicToolFailures.map((item) => `${item.label} (${item.status})`).join(", ")}`
+    );
+  }
+  if (Array.isArray(meta?.commandFailures) && meta.commandFailures.length > 0) {
+    diagnostics.push(
+      `Command failures: ${meta.commandFailures
+        .map((item) => `${item.command || "unknown command"} (${item.status}${item.exitCode == null ? "" : `, exit ${item.exitCode}`})`)
+        .join(", ")}`
+    );
+  }
+
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
+  const diagnosticPrefix =
+    diagnostics.length > 0 ? `[PLUGIN-DIAGNOSTICS]\n- ${diagnostics.join("\n- ")}\n\n` : "";
   if (rawOutput) {
-    return rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    return `${diagnosticPrefix}${output}`;
   }
 
   const message = String(parsedResult?.failureMessage ?? "").trim() || "Codex did not return a final message.";
-  return `${message}\n`;
+  return `${diagnosticPrefix}${message}\n`;
 }
 
 export function renderStatusReport(report) {

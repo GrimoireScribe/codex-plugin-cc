@@ -17,7 +17,6 @@ import {
     interruptAppServerTurn,
     parseStructuredOutput,
     readOutputSchema,
-    runAppServerReview,
     runAppServerTurn
   } from "./lib/codex.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
@@ -52,7 +51,6 @@ import {
 } from "./lib/tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
 import {
-  renderNativeReviewResult,
   renderReviewResult,
   renderStoredJobResult,
   renderCancelReport,
@@ -66,7 +64,7 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
-const NATIVE_REVIEW_IDLE_TIMEOUT_MS = 60000;
+const TASK_IDLE_TIMEOUT_MS = readPositiveEnvInt("CODEX_TASK_IDLE_TIMEOUT_MS", 180000);
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const REASONING_EFFORT_ALIASES = new Map([["minimal", "low"]]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
@@ -137,10 +135,70 @@ After reading this block, proceed with the user's actual request below.
 
 `;
 
+function readPositiveEnvInt(name, fallback) {
+  const raw = process.env[name];
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function injectRescueHygiene(prompt) {
   if (typeof prompt !== "string" || !prompt.trim()) return prompt;
   if (prompt.includes(POAGENT_RESCUE_HYGIENE_MARKER)) return prompt;
   return POAGENT_RESCUE_HYGIENE_BLOCK + prompt;
+}
+
+function buildPlatformCommandGuidance(platform = process.platform) {
+  const lines = [
+    "If shell commands fail under the sandbox, report that clearly instead of presenting an unverified clean result."
+  ];
+  if (platform === "win32") {
+    lines.push("This runtime is on Windows.");
+    lines.push("Prefer `rg`, `git grep`, or PowerShell-native reads/searches over plain `grep`.");
+  } else {
+    lines.push("Prefer `rg` or `git grep` over broad recursive shell search when possible.");
+  }
+  lines.push("For repository history or diff inspection, prefer `git` subcommands.");
+  return lines;
+}
+
+function buildReadOnlyInvestigationPrompt(prompt) {
+  const taskText = String(prompt ?? "").trim();
+  if (!taskText) {
+    return taskText;
+  }
+  return [
+    "You are running in read-only investigation mode.",
+    "Do not edit files, apply patches, or attempt persistence unless the user explicitly asks for changes.",
+    ...buildPlatformCommandGuidance(),
+    "",
+    taskText
+  ].join("\n");
+}
+
+function buildWriteTaskPrompt(prompt) {
+  const taskText = injectRescueHygiene(prompt);
+  if (typeof taskText !== "string" || !taskText.trim()) {
+    return taskText;
+  }
+  return [
+    taskText.trimEnd(),
+    "",
+    "## Runtime command guidance",
+    ...buildPlatformCommandGuidance(),
+    "",
+    "Apply the user's request with those platform constraints in mind."
+  ].join("\n");
+}
+
+function buildGraphToolFallbackPrompt(prompt, reason) {
+  return [
+    "Graph/MCP tools are currently unavailable or unstable for this run.",
+    "Do not call MCP or graph tools in this attempt.",
+    "Use read-only git diff, rg, and file reads only.",
+    `Failure trigger: ${reason}`,
+    "",
+    prompt
+  ].join("\n");
 }
 
 function printUsage() {
@@ -149,7 +207,6 @@ function printUsage() {
       "Usage:",
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/codex-companion.mjs review-mcp [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
@@ -357,31 +414,12 @@ function ensureCodexAvailable(cwd) {
   }
 }
 
-function buildNativeReviewTarget(target) {
-  if (target.mode === "working-tree") {
-    return { type: "uncommittedChanges" };
-  }
-
-  if (target.mode === "branch") {
-    return { type: "baseBranch", branch: target.baseRef };
-  }
-
-  return null;
-}
-
 function validateNativeReviewRequest(target, focusText) {
   if (focusText.trim()) {
     throw new Error(
-      `\`/codex:review\` now maps directly to the built-in reviewer and does not support custom focus text. Retry with \`/codex:adversarial-review ${focusText.trim()}\` for focused review instructions.`
+      `\`/codex:review\` is the standard review path and does not support custom focus text. Retry with \`/codex:adversarial-review ${focusText.trim()}\` for focused review instructions.`
     );
   }
-
-  const nativeTarget = buildNativeReviewTarget(target);
-  if (!nativeTarget) {
-    throw new Error("This `/codex:review` target is not supported by the built-in reviewer. Retry with `/codex:adversarial-review` for custom targeting.");
-  }
-
-  return nativeTarget;
 }
 
 function renderStatusPayload(report, asJson) {
@@ -466,127 +504,34 @@ async function executeReviewRun(request) {
   });
   const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
-  if (reviewName === "Review") {
-    const reviewTarget = validateNativeReviewRequest(target, focusText);
-    try {
-      const result = await runAppServerReview(request.cwd, {
-        target: reviewTarget,
-        model: request.model,
-        onProgress: request.onProgress,
-        idleTimeoutMs: NATIVE_REVIEW_IDLE_TIMEOUT_MS
-      });
-      const payload = {
-        review: reviewName,
-        target,
-        threadId: result.threadId,
-        sourceThreadId: result.sourceThreadId,
-        codex: {
-          status: result.status,
-          stderr: result.stderr,
-          stdout: result.reviewText,
-          reasoning: result.reasoningSummary
-        }
-      };
-      const rendered = renderNativeReviewResult(
-        {
-          status: result.status,
-          stdout: result.reviewText,
-          stderr: result.stderr
-        },
-        { reviewLabel: reviewName, targetLabel: target.label, reasoningSummary: result.reasoningSummary }
-      );
-
-      return {
-        exitStatus: result.status,
-        threadId: result.threadId,
-        turnId: result.turnId,
-        payload,
-        rendered,
-        summary: firstMeaningfulLine(result.reviewText, `${reviewName} completed.`),
-        jobTitle: `Codex ${reviewName}`,
-        jobClass: "review",
-        targetLabel: target.label
-      };
-    } catch (error) {
-      if (!shouldFallbackToSelfCollect(error)) {
-        throw error;
-      }
-
-      const detail = error instanceof Error ? error.message : String(error);
-      request.onProgress?.({
-        message: `Native review unavailable (${detail}). Falling back to self-collected review.`,
-        phase: "investigating"
-      });
-
-      const context = collectReviewContext(request.cwd, target);
-      const prompt = buildAdversarialReviewPrompt(context, buildFallbackFocusText(focusText, detail));
-      const result = await runAppServerTurn(context.repoRoot, {
-        prompt,
-        model: request.model,
-        sandbox: "read-only",
-        outputSchema: readOutputSchema(REVIEW_SCHEMA),
-        onProgress: request.onProgress
-      });
-      const parsed = parseStructuredOutput(result.finalMessage, {
-        status: result.status,
-        failureMessage: result.error?.message ?? result.stderr
-      });
-      const fallbackReviewLabel = "Review (self-collected fallback)";
-      const payload = {
-        review: reviewName,
-        target,
-        threadId: result.threadId,
-        context: {
-          repoRoot: context.repoRoot,
-          branch: context.branch,
-          summary: context.summary
-        },
-        nativeFallback: {
-          triggered: true,
-          reason: detail
-        },
-        codex: {
-          status: result.status,
-          stderr: result.stderr,
-          stdout: result.finalMessage,
-          reasoning: result.reasoningSummary
-        },
-        result: parsed.parsed,
-        rawOutput: parsed.rawOutput,
-        parseError: parsed.parseError,
-        reasoningSummary: result.reasoningSummary
-      };
-
-      return {
-        exitStatus: result.status,
-        threadId: result.threadId,
-        turnId: result.turnId,
-        payload,
-        rendered: renderReviewResult(parsed, {
-          reviewLabel: fallbackReviewLabel,
-          targetLabel: context.target.label,
-          reasoningSummary: result.reasoningSummary
-        }),
-        summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${fallbackReviewLabel} finished.`),
-        jobTitle: `Codex ${reviewName}`,
-        jobClass: "review",
-        targetLabel: context.target.label
-      };
-    }
-  }
-
   const context = collectReviewContext(request.cwd, target);
   const prompt =
-    reviewName === "MCP Review"
+    reviewName === "Review" || reviewName === "MCP Review"
       ? buildMcpReviewPrompt(context, focusText)
       : buildAdversarialReviewPrompt(context, focusText);
-  const result = await runAppServerTurn(context.repoRoot, {
-    prompt,
-    model: request.model,
-    sandbox: "read-only",
-    outputSchema: readOutputSchema(REVIEW_SCHEMA),
-    onProgress: request.onProgress
-  });
+  let result;
+  try {
+    result = await runAppServerTurn(context.repoRoot, {
+      prompt,
+      model: request.model,
+      sandbox: "read-only",
+      outputSchema: readOutputSchema(REVIEW_SCHEMA),
+      onProgress: request.onProgress
+    });
+  } catch (error) {
+    if (!shouldFallbackToSelfCollect(error)) {
+      throw error;
+    }
+    const fallbackReason = error instanceof Error ? error.message : String(error);
+    request.onProgress?.(`Graph/MCP path failed, retrying with self-collected review only: ${fallbackReason}`);
+    result = await runAppServerTurn(context.repoRoot, {
+      prompt: buildGraphToolFallbackPrompt(prompt, fallbackReason),
+      model: request.model,
+      sandbox: "read-only",
+      outputSchema: readOutputSchema(REVIEW_SCHEMA),
+      onProgress: request.onProgress
+    });
+  }
   const parsed = parseStructuredOutput(result.finalMessage, {
     status: result.status,
     failureMessage: result.error?.message ?? result.stderr
@@ -604,7 +549,9 @@ async function executeReviewRun(request) {
       status: result.status,
       stderr: result.stderr,
       stdout: result.finalMessage,
-      reasoning: result.reasoningSummary
+      reasoning: result.reasoningSummary,
+      mcpToolFailures: result.mcpToolFailures ?? [],
+      commandFailures: result.commandFailures ?? []
     },
     result: parsed.parsed,
     rawOutput: parsed.rawOutput,
@@ -657,16 +604,19 @@ async function executeTaskRun(request) {
   // LOCAL PATCH (2026-04-08): inject POAgent rescue-hygiene block into every task
   // prompt. Idempotent — no-op if the marker is already present. See helper
   // definition near top of file for full rationale.
-  const hygienizedPrompt = injectRescueHygiene(request.prompt);
+  const taskPrompt = request.write
+    ? buildWriteTaskPrompt(request.prompt)
+    : buildReadOnlyInvestigationPrompt(request.prompt);
 
   const result = await runAppServerTurn(workspaceRoot, {
     resumeThreadId,
-    prompt: hygienizedPrompt,
+    prompt: taskPrompt,
     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
     model: request.model,
     effort: request.effort,
     sandbox: request.write ? "workspace-write" : "read-only",
     onProgress: request.onProgress,
+    idleTimeoutMs: request.write ? TASK_IDLE_TIMEOUT_MS : null,
     persistThread: true,
     threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
   });
@@ -682,7 +632,11 @@ async function executeTaskRun(request) {
     {
       title: taskMetadata.title,
       jobId: request.jobId ?? null,
-      write: Boolean(request.write)
+      write: Boolean(request.write),
+      sandboxMode: request.write ? "workspace-write" : "read-only",
+      commandFailures: result.commandFailures ?? [],
+      mcpToolFailures: result.mcpToolFailures ?? [],
+      dynamicToolFailures: result.dynamicToolFailures ?? []
     }
   );
   const payload = {
@@ -690,7 +644,11 @@ async function executeTaskRun(request) {
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles,
-    reasoningSummary: result.reasoningSummary
+    reasoningSummary: result.reasoningSummary,
+    sandboxMode: request.write ? "workspace-write" : "read-only",
+    commandFailures: result.commandFailures ?? [],
+    mcpToolFailures: result.mcpToolFailures ?? [],
+    dynamicToolFailures: result.dynamicToolFailures ?? []
   };
 
   return {
@@ -708,8 +666,8 @@ async function executeTaskRun(request) {
 
 function buildReviewJobMetadata(reviewName, target) {
   return {
-    kind: reviewName === "Adversarial Review" ? "adversarial-review" : reviewName === "MCP Review" ? "review-mcp" : "review",
-    title: reviewName === "Review" ? "Codex Review" : reviewName === "MCP Review" ? "Codex MCP Review" : `Codex ${reviewName}`,
+    kind: reviewName === "Adversarial Review" ? "adversarial-review" : "review",
+    title: reviewName === "Adversarial Review" ? `Codex ${reviewName}` : "Codex Review",
     summary: `${reviewName} ${target.label}`
   };
 }
@@ -1171,11 +1129,6 @@ async function main() {
       break;
     case "review":
       await handleReview(argv);
-      break;
-    case "review-mcp":
-      await handleReviewCommand(argv, {
-        reviewName: "MCP Review"
-      });
       break;
     case "adversarial-review":
       await handleReviewCommand(argv, {

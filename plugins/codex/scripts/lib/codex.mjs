@@ -33,6 +33,8 @@
  *   messages: Array<{ lifecycle: string, phase: string | null, text: string }>,
  *   fileChanges: ThreadItem[],
  *   commandExecutions: ThreadItem[],
+ *   mcpToolCalls: ThreadItem[],
+ *   dynamicToolCalls: ThreadItem[],
  *   onProgress: ProgressReporter | null
  * }} TurnCaptureState
  */
@@ -330,6 +332,8 @@ function createTurnCaptureState(threadId, options = {}) {
     messages: [],
     fileChanges: [],
     commandExecutions: [],
+    mcpToolCalls: [],
+    dynamicToolCalls: [],
     onProgress: options.onProgress ?? null
   };
 }
@@ -515,6 +519,16 @@ function recordItem(state, item, lifecycle, threadId = null) {
 
   if (item.type === "commandExecution" && lifecycle === "completed") {
     state.commandExecutions.push(item);
+    return;
+  }
+
+  if (item.type === "mcpToolCall" && lifecycle === "completed") {
+    state.mcpToolCalls.push(item);
+    return;
+  }
+
+  if (item.type === "dynamicToolCall" && lifecycle === "completed") {
+    state.dynamicToolCalls.push(item);
   }
 }
 
@@ -707,6 +721,36 @@ async function resumeThread(client, threadId, cwd, options = {}) {
 
 function buildResultStatus(turnState) {
   return turnState.finalTurn?.status === "completed" ? 0 : 1;
+}
+
+function normalizeItemStatus(item) {
+  if (typeof item?.status === "string" && item.status.trim()) {
+    return item.status.trim();
+  }
+  return "unknown";
+}
+
+function isFailedItemStatus(status) {
+  return status !== "completed";
+}
+
+function summarizeCommandFailures(commandExecutions) {
+  return (commandExecutions ?? [])
+    .filter((item) => isFailedItemStatus(normalizeItemStatus(item)))
+    .map((item) => ({
+      command: item.command ?? "",
+      status: normalizeItemStatus(item),
+      exitCode: item.exitCode ?? null
+    }));
+}
+
+function summarizeToolFailures(toolCalls, formatter) {
+  return (toolCalls ?? [])
+    .filter((item) => isFailedItemStatus(normalizeItemStatus(item)))
+    .map((item) => ({
+      label: formatter(item),
+      status: normalizeItemStatus(item)
+    }));
 }
 
 const BUILTIN_PROVIDER_LABELS = new Map([
@@ -1091,7 +1135,12 @@ export async function runAppServerTurn(cwd, options = {}) {
       stderr: cleanCodexStderr(client.stderr),
       fileChanges: turnState.fileChanges,
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
-      commandExecutions: turnState.commandExecutions
+      commandExecutions: turnState.commandExecutions,
+      mcpToolCalls: turnState.mcpToolCalls,
+      dynamicToolCalls: turnState.dynamicToolCalls,
+      commandFailures: summarizeCommandFailures(turnState.commandExecutions),
+      mcpToolFailures: summarizeToolFailures(turnState.mcpToolCalls, (item) => `${item.server}/${item.tool}`),
+      dynamicToolFailures: summarizeToolFailures(turnState.dynamicToolCalls, (item) => item.tool ?? "unknown tool")
     };
   });
 }

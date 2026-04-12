@@ -51,7 +51,7 @@ Then run:
 
 This fork keeps the upstream command surface but adds Grimoire-specific hardening for Windows shell handling, stale job cleanup, broker reuse, and rescue-task prompt hygiene.
 
-Current fork version: `1.0.3-grimoire.2`
+Current fork version: `1.0.3-grimoire.7`
 
 If you prefer to install Codex yourself, use:
 
@@ -82,7 +82,7 @@ One simple first run is:
 
 ### `/codex:review`
 
-Runs a normal Codex review on your current work. It gives you the same quality of code review as running `/review` inside Codex directly.
+Runs the default standard Codex review on your current work. It uses the self-collected review path, so it can use MCP tools when the session exposes them.
 
 > [!NOTE]
 > Code review especially for multi-file changes might take a while. It's generally recommended to run it in the background.

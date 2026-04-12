@@ -1,11 +1,11 @@
 ---
-description: Run a Codex code review against local git state
+description: Run an MCP-capable Codex review against local git state
 argument-hint: '[--wait|--background] [--model <model|spark>] [--base <ref>] [--scope auto|working-tree|branch]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 
-Run a Codex review through the shared built-in reviewer.
+Run a Codex review through the shared plugin runtime using `turn/start`, so MCP tools can be used when available.
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -37,7 +37,9 @@ Argument handling:
 - Preserve `--model` if the user supplied one.
 - Do not add extra review instructions or rewrite the user's intent.
 - The companion script parses `--wait` and `--background`, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.
-- `/codex:review` is native-review only. It does not support staged-only review, unstaged-only review, or extra focus text.
+- `/codex:review` is the default standard review path.
+- It can use MCP when the session exposes those tools.
+- It does not support staged-only review, unstaged-only review, or extra focus text.
 - If the user needs custom review instructions or more adversarial framing, they should use `/codex:adversarial-review`.
 
 Foreground flow:

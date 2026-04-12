@@ -136,7 +136,7 @@ test("setup reports not ready when app-server config read fails", () => {
   assert.match(payload.auth.detail, /config\/read failed for cwd/);
 });
 
-test("review renders a no-findings result from app-server review/start", () => {
+test("review renders a no-findings result from the default self-collected review path", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -175,6 +175,76 @@ test("task runs when the active provider does not require OpenAI login", () => {
   assert.match(result.stdout, /Handled the requested task/);
 });
 
+test("task investigation runs read-only by default and skips the write hygiene block", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "investigate the flaky review regression"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.match(fakeState.lastTurnStart.prompt, /read-only investigation mode/i);
+  assert.doesNotMatch(fakeState.lastTurnStart.prompt, /\[POAGENT-RESCUE-HYGIENE-2026-04-08\]/);
+});
+
+test("task write mode injects rescue hygiene and runtime command guidance", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "--write", "fix the shell command usage"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.match(fakeState.lastTurnStart.prompt, /\[POAGENT-RESCUE-HYGIENE-2026-04-08\]/);
+  assert.match(fakeState.lastTurnStart.prompt, /Runtime command guidance/);
+  assert.match(fakeState.lastTurnStart.prompt, /If shell commands fail under the sandbox, report that clearly/i);
+  if (process.platform === "win32") {
+    assert.match(fakeState.lastTurnStart.prompt, /This runtime is on Windows\./);
+    assert.match(fakeState.lastTurnStart.prompt, /Prefer `rg`, `git grep`, or PowerShell-native reads\/searches over plain `grep`\./);
+  } else {
+    assert.match(fakeState.lastTurnStart.prompt, /Prefer `rg` or `git grep` over broad recursive shell search when possible\./);
+  }
+});
+
+test("task surfaces plugin diagnostics for MCP and command failures", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "task-runtime-failures");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "investigate the failing rescue run"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[PLUGIN-DIAGNOSTICS\]/);
+  assert.match(result.stdout, /Sandbox: read-only/);
+  assert.match(result.stdout, /MCP tool failures: code-review-graph\/get_minimal_context_tool \(failed\)/);
+  assert.match(result.stdout, /Command failures: git show HEAD~1 \(failed, exit 1\)/);
+});
+
 test("task runs without auth preflight so Codex can refresh an expired session", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
@@ -211,7 +281,7 @@ test("task reports the actual Codex auth error when the run is rejected", () => 
   assert.match(result.stderr, /authentication expired; run codex login/);
 });
 
-test("review accepts the quoted raw argument style for built-in base-branch review", () => {
+test("review accepts the quoted raw argument style for standard base-branch review", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();
   installFakeCodex(binDir);
@@ -318,6 +388,28 @@ test("review includes reasoning output when the app server returns it", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Reasoning:/);
   assert.match(result.stdout, /Reviewed the changed files and checked the likely regression paths first|Reviewed the changed files and checked the likely regression paths/i);
+});
+
+test("review retries without MCP tools when the graph path crashes the turn", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const fakeStatePath = path.join(binDir, "fake-codex-state.json");
+  installFakeCodex(binDir, "review-fallback-after-mcp-crash");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+  fs.writeFileSync(path.join(repo, "README.md"), "hello again\n");
+
+  const result = run("node", [SCRIPT, "review"], {
+    cwd: repo,
+    env: buildEnv(binDir)
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /No material issues found/);
+  const fakeState = JSON.parse(fs.readFileSync(fakeStatePath, "utf8"));
+  assert.match(fakeState.lastTurnStart.prompt, /Do not call MCP or graph tools in this attempt\./);
 });
 
 test("review logs reasoning summaries and review output to the job log", () => {
@@ -646,6 +738,27 @@ test("task forwards model selection and reasoning effort to app-server turn/star
   const fakeState = JSON.parse(fs.readFileSync(statePath, "utf8"));
   assert.equal(fakeState.lastTurnStart.model, "gpt-5.3-codex-spark");
   assert.equal(fakeState.lastTurnStart.effort, "low");
+});
+
+test("task fails fast when a turn goes silent without completing", () => {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  installFakeCodex(binDir, "stalled-task");
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  const result = run("node", [SCRIPT, "task", "investigate the flaky worker timeout"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_TASK_IDLE_TIMEOUT_MS: "100"
+    }
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex turn timed out after 1s without progress\./);
 });
 
 test("task logs reasoning summaries and assistant messages to the job log", () => {

@@ -231,6 +231,37 @@ function taskPayload(prompt, resume) {
   return "Handled the requested task.\\nTask prompt accepted.";
 }
 
+function buildTaskRuntimeFailureItems(turnId) {
+  return [
+    {
+      completed: {
+        type: "mcpToolCall",
+        id: "mcp_" + turnId,
+        server: "code-review-graph",
+        tool: "get_minimal_context_tool",
+        status: "failed"
+      }
+    },
+    {
+      completed: {
+        type: "commandExecution",
+        id: "cmd_" + turnId,
+        command: "git show HEAD~1",
+        status: "failed",
+        exitCode: 1
+      }
+    },
+    {
+      completed: {
+        type: "agentMessage",
+        id: "msg_" + turnId,
+        text: "Completed the investigation, but some runtime checks failed.",
+        phase: "final_answer"
+      }
+    }
+  ];
+}
+
 const args = process.argv.slice(2);
 if (args[0] === "--version") {
   console.log("codex-cli test");
@@ -385,6 +416,14 @@ rl.on("line", (line) => {
 	        saveState(state);
 	        send({ id: message.id, result: { turn: buildTurn(turnId) } });
 
+        if (
+          BEHAVIOR === "review-fallback-after-mcp-crash" &&
+          message.params.outputSchema &&
+          !prompt.includes("Do not call MCP or graph tools in this attempt.")
+        ) {
+          process.exit(1);
+        }
+
         const payload = message.params.outputSchema && message.params.outputSchema.properties && message.params.outputSchema.properties.verdict
           ? structuredReviewPayload(prompt)
           : taskPayload(prompt, thread.name && thread.name.startsWith("Codex Companion Task") && prompt.includes("Continue from the current thread state"));
@@ -498,7 +537,9 @@ rl.on("line", (line) => {
           break;
         }
 
-        const items = [
+        const items = BEHAVIOR === "task-runtime-failures"
+          ? buildTaskRuntimeFailureItems(turnId)
+          : [
           ...(BEHAVIOR === "with-reasoning"
             ? [
                 {
@@ -531,6 +572,8 @@ rl.on("line", (line) => {
 	            send({ method: "turn/completed", params: { threadId: thread.id, turn: buildTurn(turnId, "completed") } });
 	          }, 5000);
 	          interruptibleTurns.set(turnId, { threadId: thread.id, timer });
+	        } else if (BEHAVIOR === "stalled-task") {
+	          send({ method: "turn/started", params: { threadId: thread.id, turn: buildTurn(turnId) } });
 	        } else if (BEHAVIOR === "slow-task") {
 	          emitTurnCompletedLater(thread.id, turnId, items, 400);
 	        } else {

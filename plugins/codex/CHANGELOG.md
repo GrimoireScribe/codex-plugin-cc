@@ -1,8 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Make `/codex:review` the default MCP-capable self-collected standard review path.
+- Remove the separate `/codex:review:mcp` and `/codex:review-mcp` command surfaces.
+
 ## 1.0.3-grimoire.6
 
-- Expose `--model <model|spark>` on review slash-command surfaces: `/codex:review`, `/codex:review:mcp`, `/codex:review-mcp`, and `/codex:adversarial-review`.
+- Expose `--model <model|spark>` on the then-current review slash-command surfaces before the MCP aliases were later folded into `/codex:review`.
 
 ## 1.0.3-grimoire.5
 
@@ -10,8 +15,8 @@
 
 ## 1.0.3-grimoire.4
 
-- Add a new MCP-capable review path exposed as `review-mcp` in the companion runtime and packaged slash commands.
-- Keep native `/codex:review` unchanged while allowing a separate self-collected review flow that can use MCP tools when available.
+- Add the first MCP-capable self-collected standard review path before it was later folded into `/codex:review`.
+- At that point, keep native `/codex:review` unchanged while allowing a separate MCP-capable review flow.
 
 ## 1.0.3-grimoire.3
 

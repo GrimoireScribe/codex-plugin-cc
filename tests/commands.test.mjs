@@ -71,7 +71,11 @@ test("adversarial review command uses AskUserQuestion and background Bash while 
 });
 
 test("continue is not exposed as a user-facing command", () => {
-  const commandFiles = fs.readdirSync(path.join(PLUGIN_ROOT, "commands")).sort();
+  const commandFiles = fs
+    .readdirSync(path.join(PLUGIN_ROOT, "commands"), { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .sort();
   assert.deepEqual(commandFiles, [
     "adversarial-review.md",
     "cancel.md",
