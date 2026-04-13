@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
-function quoteShellArg(value) {
+export function quoteShellArg(value) {
   const text = String(value ?? "");
   if (!text) {
     return process.platform === "win32" ? "\"\"" : "''";

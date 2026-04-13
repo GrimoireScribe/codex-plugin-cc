@@ -45,7 +45,7 @@ import os from "node:os";
 import path from "node:path";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.mjs";
 import { loadBrokerSession } from "./broker-lifecycle.mjs";
-import { binaryAvailable } from "./process.mjs";
+import { binaryAvailable, terminateProcessTree, quoteShellArg } from "./process.mjs";
 
 const SERVICE_NAME = "claude_code_codex_plugin";
 const TASK_THREAD_PREFIX = "Codex Companion Task";
@@ -1321,6 +1321,7 @@ export async function runCodexExecTask(cwd, options = {}) {
   let timedOut = false;
   let finalizationTimer = null;
   let finalizedAfterMessage = false;
+  let killChild = () => {};
 
   const resetIdleTimer = () => {
     if (!options.idleTimeoutMs) {
@@ -1331,7 +1332,7 @@ export async function runCodexExecTask(cwd, options = {}) {
     }
     idleTimer = setTimeout(() => {
       timedOut = true;
-      child.kill();
+      killChild();
     }, options.idleTimeoutMs);
   };
 
@@ -1346,7 +1347,7 @@ export async function runCodexExecTask(cwd, options = {}) {
     clearFinalizationTimer();
     finalizationTimer = setTimeout(() => {
       finalizedAfterMessage = true;
-      child.kill();
+      killChild();
     }, 5000);
   };
 
@@ -1374,7 +1375,7 @@ export async function runCodexExecTask(cwd, options = {}) {
   const spawnTarget = resolveCodexSpawnTarget(options.env ?? process.env);
   const allArgs = [...spawnTarget.preArgs, ...args];
   const spawnCommand = spawnTarget.shell && allArgs.length > 0
-    ? [spawnTarget.command, ...allArgs].map((a) => /[\s"&|<>^()!]/.test(a) ? `"${a}"` : a).join(" ")
+    ? [spawnTarget.command, ...allArgs].map(quoteShellArg).join(" ")
     : spawnTarget.command;
   const spawnArgs = spawnTarget.shell && allArgs.length > 0 ? [] : allArgs;
   const child = spawn(spawnCommand, spawnArgs, {
@@ -1419,6 +1420,8 @@ export async function runCodexExecTask(cwd, options = {}) {
         case "tool_call.started":
         case "mcp_tool_call.started":
         case "function_call.started":
+          clearFinalizationTimer();
+          finalizedAfterMessage = false;
           resetIdleTimer();
           break;
         case "item.completed": {
@@ -1430,6 +1433,8 @@ export async function runCodexExecTask(cwd, options = {}) {
             scheduleFinalizationTimer();
             break;
           }
+          clearFinalizationTimer();
+          finalizedAfterMessage = false;
           if (itemType === "command_execution") {
             if (String(item.status ?? "").trim().toLowerCase() === "failed") {
               commandFailures.push({
@@ -1467,8 +1472,14 @@ export async function runCodexExecTask(cwd, options = {}) {
     }
   };
 
-  const killChild = () => {
-    try { child.kill(); } catch { /* already dead */ }
+  killChild = () => {
+    try {
+      if (child.pid) {
+        terminateProcessTree(child.pid);
+      } else {
+        child.kill();
+      }
+    } catch { /* already dead */ }
   };
   process.on("SIGTERM", killChild);
   process.on("SIGINT", killChild);
