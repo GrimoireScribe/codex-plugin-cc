@@ -40,7 +40,8 @@ Forwarding rules:
 - Otherwise forward the task as a fresh `task` run.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Return the stdout of the `codex-companion` command exactly as-is.
-- If the Bash call fails or Codex cannot be invoked, return nothing.
+- If the Bash call fails, times out, or Codex returns an empty result, retry ONCE with the same command before giving up.
+- If the retry also fails, return the error message so the caller can diagnose.
 
 Response style:
 

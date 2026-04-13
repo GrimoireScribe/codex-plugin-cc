@@ -1372,7 +1372,12 @@ export async function runCodexExecTask(cwd, options = {}) {
   emitProgress(options.onProgress, "Starting Codex exec task.", "starting");
 
   const spawnTarget = resolveCodexSpawnTarget(options.env ?? process.env);
-  const child = spawn(spawnTarget.command, [...spawnTarget.preArgs, ...args], {
+  const allArgs = [...spawnTarget.preArgs, ...args];
+  const spawnCommand = spawnTarget.shell && allArgs.length > 0
+    ? [spawnTarget.command, ...allArgs].map((a) => /[\s"&|<>^()!]/.test(a) ? `"${a}"` : a).join(" ")
+    : spawnTarget.command;
+  const spawnArgs = spawnTarget.shell && allArgs.length > 0 ? [] : allArgs;
+  const child = spawn(spawnCommand, spawnArgs, {
     cwd,
     env: options.env ?? process.env,
     shell: spawnTarget.shell,
@@ -1409,6 +1414,12 @@ export async function runCodexExecTask(cwd, options = {}) {
             threadId: threadId ?? null,
             turnId: turnId ?? null
           });
+          break;
+        case "item.started":
+        case "tool_call.started":
+        case "mcp_tool_call.started":
+        case "function_call.started":
+          resetIdleTimer();
           break;
         case "item.completed": {
           const item = event.item ?? {};
@@ -1456,38 +1467,52 @@ export async function runCodexExecTask(cwd, options = {}) {
     }
   };
 
-  const exitStatus = await new Promise((resolve, reject) => {
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    if (typeof options.prompt === "string" && child.stdin) {
-      child.stdin.write(options.prompt);
-      child.stdin.end();
-    }
-    child.stdout?.on("data", processStdoutChunk);
-    child.stderr?.on("data", (chunk) => {
-      resetIdleTimer();
-      stderr += String(chunk);
+  const killChild = () => {
+    try { child.kill(); } catch { /* already dead */ }
+  };
+  process.on("SIGTERM", killChild);
+  process.on("SIGINT", killChild);
+  process.on("exit", killChild);
+
+  let exitStatus;
+  try {
+    exitStatus = await new Promise((resolve, reject) => {
+      child.stdout?.setEncoding("utf8");
+      child.stderr?.setEncoding("utf8");
+      if (typeof options.prompt === "string" && child.stdin) {
+        child.stdin.write(options.prompt);
+        child.stdin.end();
+      }
+      child.stdout?.on("data", processStdoutChunk);
+      child.stderr?.on("data", (chunk) => {
+        resetIdleTimer();
+        stderr += String(chunk);
+      });
+      child.on("error", reject);
+      child.on("close", (code) => {
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+        }
+        clearFinalizationTimer();
+        if (stdoutRemainder.trim()) {
+          processStdoutChunk("\n");
+        }
+        if (finalizedAfterMessage && finalMessage.trim()) {
+          resolve(0);
+          return;
+        }
+        if (timedOut && options.idleTimeoutMs) {
+          reject(new Error(`Codex turn timed out after ${Math.ceil(options.idleTimeoutMs / 1000)}s without progress.`));
+          return;
+        }
+        resolve(code ?? 1);
+      });
     });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (idleTimer) {
-        clearTimeout(idleTimer);
-      }
-      clearFinalizationTimer();
-      if (stdoutRemainder.trim()) {
-        processStdoutChunk("\n");
-      }
-      if (finalizedAfterMessage && finalMessage.trim()) {
-        resolve(0);
-        return;
-      }
-      if (timedOut && options.idleTimeoutMs) {
-        reject(new Error(`Codex turn timed out after ${Math.ceil(options.idleTimeoutMs / 1000)}s without progress.`));
-        return;
-      }
-      resolve(code ?? 1);
-    });
-  });
+  } finally {
+    process.removeListener("SIGTERM", killChild);
+    process.removeListener("SIGINT", killChild);
+    process.removeListener("exit", killChild);
+  }
 
   const cleanedStderr = cleanCodexStderr(stderr);
   try {
