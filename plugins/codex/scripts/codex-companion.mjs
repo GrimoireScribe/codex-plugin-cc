@@ -7,6 +7,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
+import { parseExpectFiles, decideTaskExit } from "./lib/expect-files.mjs";
 import {
     DEFAULT_CONTINUE_PROMPT,
     findLatestTaskThread,
@@ -264,6 +265,30 @@ function parseCommandInput(argv, config = {}) {
       ...(config.aliasMap ?? {})
     }
   });
+}
+
+function collectRepeatedValueOption(argv, key) {
+  const normalized = normalizeArgv(argv);
+  const longForm = `--${key}`;
+  const longFormPrefix = `--${key}=`;
+  const values = [];
+  const rest = [];
+  for (let i = 0; i < normalized.length; i += 1) {
+    const token = normalized[i];
+    if (token === longForm) {
+      const next = normalized[i + 1];
+      if (next === undefined) throw new Error(`Missing value for ${longForm}`);
+      values.push(next);
+      i += 1;
+      continue;
+    }
+    if (typeof token === "string" && token.startsWith(longFormPrefix)) {
+      values.push(token.slice(longFormPrefix.length));
+      continue;
+    }
+    rest.push(token);
+  }
+  return { argv: rest, values };
 }
 
 function resolveCommandCwd(options = {}) {
@@ -605,23 +630,11 @@ async function executeTaskRun(request) {
 
   // Ground-truth verification: Codex self-reports are unreliable. If the caller
   // declared expected deliverable paths, the filesystem is authoritative.
-  const expected = verifyExpectedFiles(request.expectFiles ?? []);
   const codexExit = typeof result.status === "number" ? result.status : (result.status ? 1 : 0);
-  let exitStatus = codexExit;
-  let verificationMessage = "";
-  if (Array.isArray(request.expectFiles) && request.expectFiles.length > 0) {
-    if (expected.allPresent) {
-      // Files on disk override Codex's exit code — work landed.
-      exitStatus = 0;
-      if (codexExit !== 0) {
-        verificationMessage = `Codex exited non-zero (${codexExit}) but all expected files are present; treating as success.`;
-      }
-    } else {
-      const missing = expected.checked.filter((c) => c.status !== "PRESENT").map((c) => `${c.status}: ${c.path}`).join("; ");
-      verificationMessage = `Expected deliverables not written: ${missing}`;
-      exitStatus = codexExit !== 0 ? codexExit : 1;
-    }
-  }
+  const decision = decideTaskExit(codexExit, request.expectFiles ?? []);
+  const exitStatus = decision.exitStatus;
+  const verificationMessage = decision.verificationMessage;
+  const expected = decision.expected;
 
   const rendered = renderTaskResult(
     {
@@ -754,42 +767,6 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
   };
 }
 
-function parseExpectFiles(raw, cwd) {
-  if (!raw || typeof raw !== "string") return [];
-  const parts = raw.split(",").map((p) => p.trim()).filter(Boolean);
-  const base = cwd || process.cwd();
-  return parts.map((p) => path.isAbsolute(p) ? path.normalize(p) : path.resolve(base, p));
-}
-
-function verifyExpectedFiles(expectFiles) {
-  if (!Array.isArray(expectFiles) || expectFiles.length === 0) {
-    return { checked: [], allPresent: true, anyMissing: false, anyEmpty: false };
-  }
-  const checked = [];
-  let allPresent = true;
-  let anyMissing = false;
-  let anyEmpty = false;
-  for (const target of expectFiles) {
-    let exists = false;
-    let size = 0;
-    let error = null;
-    try {
-      const stat = fs.statSync(target);
-      exists = true;
-      size = stat.size;
-    } catch (e) {
-      error = e?.code === "ENOENT" ? "ENOENT" : (e?.code || "ERROR");
-    }
-    const empty = exists && size === 0;
-    const status = !exists ? "MISSING" : empty ? "EMPTY" : "PRESENT";
-    if (!exists) anyMissing = true;
-    if (empty) anyEmpty = true;
-    if (!exists || empty) allPresent = false;
-    checked.push({ path: target, status, exists, size, error });
-  }
-  return { checked, allPresent, anyMissing, anyEmpty };
-}
-
 function readTaskPrompt(cwd, options, positionals) {
   if (options["prompt-file"]) {
     return fs.readFileSync(path.resolve(cwd, options["prompt-file"]), "utf8");
@@ -910,8 +887,9 @@ async function handleReview(argv) {
 }
 
 async function handleTask(argv) {
-  const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file", "expect-file"],
+  const { argv: strippedArgv, values: rawExpectFiles } = collectRepeatedValueOption(argv, "expect-file");
+  const { options, positionals } = parseCommandInput(strippedArgv, {
+    valueOptions: ["model", "effort", "cwd", "prompt-file"],
     booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
     aliasMap: {
       m: "model"
@@ -923,7 +901,7 @@ async function handleTask(argv) {
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
-  const expectFiles = parseExpectFiles(options["expect-file"], cwd);
+  const expectFiles = parseExpectFiles(rawExpectFiles, cwd);
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
   const fresh = Boolean(options.fresh);
