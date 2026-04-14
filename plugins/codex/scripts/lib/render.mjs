@@ -335,16 +335,30 @@ export function renderTaskResult(parsedResult, meta) {
     );
   }
 
+  let expectedBlock = "";
+  if (Array.isArray(meta?.expectedFiles) && meta.expectedFiles.length > 0) {
+    const lines = meta.expectedFiles.map((f) => {
+      if (f.status === "PRESENT") return `- PRESENT (${f.size} bytes): ${f.path}`;
+      if (f.status === "EMPTY") return `- EMPTY (0 bytes): ${f.path}`;
+      return `- MISSING${f.error ? ` (${f.error})` : ""}: ${f.path}`;
+    });
+    expectedBlock = `[EXPECTED-FILES]\n${lines.join("\n")}\n`;
+    if (meta.verificationMessage) {
+      expectedBlock += `- ${meta.verificationMessage}\n`;
+    }
+    expectedBlock += "\n";
+  }
+
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   const diagnosticPrefix =
     diagnostics.length > 0 ? `[PLUGIN-DIAGNOSTICS]\n- ${diagnostics.join("\n- ")}\n\n` : "";
   if (rawOutput) {
     const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
-    return `${diagnosticPrefix}${output}`;
+    return `${diagnosticPrefix}${expectedBlock}${output}`;
   }
 
   const message = String(parsedResult?.failureMessage ?? "").trim() || "Codex did not return a final message.";
-  return `${diagnosticPrefix}${message}\n`;
+  return `${diagnosticPrefix}${expectedBlock}${message}\n`;
 }
 
 export function renderStatusReport(report) {

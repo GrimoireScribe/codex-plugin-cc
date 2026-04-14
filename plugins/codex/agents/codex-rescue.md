@@ -33,6 +33,7 @@ Forwarding rules:
 - Treat `--effort <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
 - Default to a read-only Codex run for investigation, diagnosis, verification, review, inspection, root-cause analysis, or research.
 - Add `--write` only when the user explicitly asks Codex to edit files or the request clearly requires making a fix, patch, refactor, or code change.
+- When the user's task declares specific output files that Codex must produce (e.g. "write the review to X.md", "save results to Y.json"), pass those paths via `--expect-file "<abs-or-relative-path>[,<path>...]"`. The companion verifies each path on the filesystem after Codex exits; missing or empty files cause a failure even if Codex self-reports success, and present files count as success even if Codex exits non-zero. Codex's own reports are unreliable — filesystem ground truth is authoritative.
 - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
 - `--resume` means add `--resume-last`.
 - `--fresh` means do not add `--resume-last`.

@@ -198,7 +198,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [prompt]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [--expect-file <path[,path...]>] [prompt]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -602,6 +602,27 @@ async function executeTaskRun(request) {
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.error?.message ?? result.stderr ?? "";
+
+  // Ground-truth verification: Codex self-reports are unreliable. If the caller
+  // declared expected deliverable paths, the filesystem is authoritative.
+  const expected = verifyExpectedFiles(request.expectFiles ?? []);
+  const codexExit = typeof result.status === "number" ? result.status : (result.status ? 1 : 0);
+  let exitStatus = codexExit;
+  let verificationMessage = "";
+  if (Array.isArray(request.expectFiles) && request.expectFiles.length > 0) {
+    if (expected.allPresent) {
+      // Files on disk override Codex's exit code — work landed.
+      exitStatus = 0;
+      if (codexExit !== 0) {
+        verificationMessage = `Codex exited non-zero (${codexExit}) but all expected files are present; treating as success.`;
+      }
+    } else {
+      const missing = expected.checked.filter((c) => c.status !== "PRESENT").map((c) => `${c.status}: ${c.path}`).join("; ");
+      verificationMessage = `Expected deliverables not written: ${missing}`;
+      exitStatus = codexExit !== 0 ? codexExit : 1;
+    }
+  }
+
   const rendered = renderTaskResult(
     {
       rawOutput,
@@ -615,11 +636,14 @@ async function executeTaskRun(request) {
       sandboxMode: request.write ? "workspace-write" : "read-only",
       commandFailures: result.commandFailures ?? [],
       mcpToolFailures: result.mcpToolFailures ?? [],
-      dynamicToolFailures: result.dynamicToolFailures ?? []
+      dynamicToolFailures: result.dynamicToolFailures ?? [],
+      expectedFiles: expected.checked,
+      verificationMessage
     }
   );
   const payload = {
-    status: result.status,
+    status: exitStatus,
+    codexExitStatus: codexExit,
     threadId: result.threadId,
     rawOutput,
     touchedFiles: result.touchedFiles,
@@ -627,11 +651,13 @@ async function executeTaskRun(request) {
     sandboxMode: request.write ? "workspace-write" : "read-only",
     commandFailures: result.commandFailures ?? [],
     mcpToolFailures: result.mcpToolFailures ?? [],
-    dynamicToolFailures: result.dynamicToolFailures ?? []
+    dynamicToolFailures: result.dynamicToolFailures ?? [],
+    expectedFiles: expected.checked,
+    verificationMessage: verificationMessage || null
   };
 
   return {
-    exitStatus: result.status,
+    exitStatus,
     threadId: result.threadId,
     turnId: result.turnId,
     payload,
@@ -715,7 +741,7 @@ function buildTaskJob(workspaceRoot, taskMetadata, write) {
   });
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId, expectFiles }) {
   return {
     cwd,
     model,
@@ -723,8 +749,45 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, jobId
     prompt,
     write,
     resumeLast,
-    jobId
+    jobId,
+    expectFiles: Array.isArray(expectFiles) ? expectFiles.slice() : []
   };
+}
+
+function parseExpectFiles(raw, cwd) {
+  if (!raw || typeof raw !== "string") return [];
+  const parts = raw.split(",").map((p) => p.trim()).filter(Boolean);
+  const base = cwd || process.cwd();
+  return parts.map((p) => path.isAbsolute(p) ? path.normalize(p) : path.resolve(base, p));
+}
+
+function verifyExpectedFiles(expectFiles) {
+  if (!Array.isArray(expectFiles) || expectFiles.length === 0) {
+    return { checked: [], allPresent: true, anyMissing: false, anyEmpty: false };
+  }
+  const checked = [];
+  let allPresent = true;
+  let anyMissing = false;
+  let anyEmpty = false;
+  for (const target of expectFiles) {
+    let exists = false;
+    let size = 0;
+    let error = null;
+    try {
+      const stat = fs.statSync(target);
+      exists = true;
+      size = stat.size;
+    } catch (e) {
+      error = e?.code === "ENOENT" ? "ENOENT" : (e?.code || "ERROR");
+    }
+    const empty = exists && size === 0;
+    const status = !exists ? "MISSING" : empty ? "EMPTY" : "PRESENT";
+    if (!exists) anyMissing = true;
+    if (empty) anyEmpty = true;
+    if (!exists || empty) allPresent = false;
+    checked.push({ path: target, status, exists, size, error });
+  }
+  return { checked, allPresent, anyMissing, anyEmpty };
 }
 
 function readTaskPrompt(cwd, options, positionals) {
@@ -848,7 +911,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "expect-file"],
     booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background"],
     aliasMap: {
       m: "model"
@@ -860,6 +923,7 @@ async function handleTask(argv) {
   const model = normalizeRequestedModel(options.model);
   const effort = normalizeReasoningEffort(options.effort);
   const prompt = readTaskPrompt(cwd, options, positionals);
+  const expectFiles = parseExpectFiles(options["expect-file"], cwd);
 
   const resumeLast = Boolean(options["resume-last"] || options.resume);
   const fresh = Boolean(options.fresh);
@@ -884,7 +948,8 @@ async function handleTask(argv) {
       prompt,
       write,
       resumeLast,
-      jobId: job.id
+      jobId: job.id,
+      expectFiles
     });
     const { payload } = enqueueBackgroundTask(cwd, job, request);
     outputCommandResult(payload, renderQueuedTaskLaunch(payload), options.json);
@@ -903,6 +968,7 @@ async function handleTask(argv) {
         write,
         resumeLast,
         jobId: job.id,
+        expectFiles,
         onProgress: progress
       }),
     { json: options.json }
