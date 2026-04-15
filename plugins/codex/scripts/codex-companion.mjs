@@ -798,13 +798,20 @@ async function executeTaskRun(request) {
     }
   })();
 
+  // For incremental-write commands (spec/scoping-adversarial-review), extend the
+  // finalization timer. gpt-5.4 emits planning narration as agent_message items
+  // between apply_patch calls, and deliberates for longer than 5s between sections.
+  // The default 5s timer was killing the process mid-review.
+  const finalizationTimeoutMs = request.incrementalWrite ? 60000 : undefined;
+
   const result = await runCodexExecTask(workspaceRoot, {
     resumeThreadId,
     prompt: taskPrompt || (resumeThreadId ? DEFAULT_CONTINUE_PROMPT : ""),
     model: request.model,
     effort: request.effort,
     onProgress: request.onProgress,
-    idleTimeoutMs: TASK_IDLE_TIMEOUT_MS
+    idleTimeoutMs: TASK_IDLE_TIMEOUT_MS,
+    finalizationTimeoutMs
   });
 
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
@@ -837,8 +844,14 @@ async function executeTaskRun(request) {
       return false;
     }
   })();
+  // For incremental-write commands, suppress the companion-layer fallback write.
+  // The fallback was designed for single-output task writes (dump final message to file).
+  // For incremental reviews, the model writes sections one-by-one via apply_patch.
+  // If the model never called apply_patch (e.g. it emitted only planning narration),
+  // writing rawOutput (the narration) to the output path produces a misleading file
+  // that looks like a review but contains no structured findings.
   const saveOutput = maybePersistTaskOutput({
-    allowWrite: Boolean(request.write),
+    allowWrite: Boolean(request.write) && !request.incrementalWrite,
     rawOutput,
     savePath: requestedSavePath,
     savePathAlreadyTouched
@@ -1208,9 +1221,10 @@ async function handleSpecAdversarialReview(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["spec", "output", "model", "effort", "cwd"],
     // --wait is accepted for symmetry with other commands (this path is always foreground).
-    // --no-mcp is accepted to avoid crashing on stall-reroute retries; it is a no-op here
-    // because spec-adversarial-review always runs through runCodexExecTask with
-    // --dangerously-bypass-approvals-and-sandbox regardless.
+    // --no-mcp is accepted to avoid crashing on stall-reroute retries. NOTE: it is a
+    // no-op here — this path uses `codex exec --dangerously-bypass-approvals-and-sandbox`,
+    // which bypasses approval prompts but does not control MCP availability separately.
+    // There is no `--no-mcp` flag in `codex exec`. The flag is silently ignored.
     booleanOptions: ["json", "background", "wait", "no-mcp"]
   });
 
@@ -1235,21 +1249,6 @@ async function handleSpecAdversarialReview(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-
-  // Truncate any pre-existing partial output file before starting. A stale partial
-  // file (from a previous failed or incomplete run) confuses the model — it may read
-  // the partial content, conclude the review is already in progress or complete, and
-  // then emit only planning narration without writing sections. Clear-before-run
-  // ensures every attempt starts from a known-empty state, which matches the
-  // incremental-write protocol in the prompt template.
-  try {
-    if (fs.existsSync(outputPath)) {
-      fs.writeFileSync(outputPath, "", "utf8");
-    }
-  } catch (err) {
-    process.stderr.write(`[codex] Warning: could not clear prior output file ${outputPath}: ${err.message}\n`);
-  }
-
   const job = createCompanionJob({
     prefix: "spec-review",
     kind: "task",
@@ -1268,6 +1267,12 @@ async function handleSpecAdversarialReview(argv) {
         model: normalizeRequestedModel(options.model),
         effort: normalizeReasoningEffort(options.effort),
         write: true,
+        // incrementalWrite: the model writes sections one-by-one via apply_patch.
+        // This flag: (1) extends the finalization timer to 60s so gpt-5.4 has time to
+        // deliberate between sections without the process being killed, and (2) suppresses
+        // the companion-layer fallback write so plan-narration is never dumped to the
+        // output file as if it were review content.
+        incrementalWrite: true,
         expectFiles: [outputPath],
         onProgress: progress
       }),
@@ -1302,18 +1307,6 @@ async function handleScopingAdversarialReview(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-
-  // Same clear-before-run logic as handleSpecAdversarialReview — see that function
-  // for rationale. A pre-existing partial file causes the model to skip apply_patch
-  // calls and emit only planning narration.
-  try {
-    if (fs.existsSync(outputPath)) {
-      fs.writeFileSync(outputPath, "", "utf8");
-    }
-  } catch (err) {
-    process.stderr.write(`[codex] Warning: could not clear prior output file ${outputPath}: ${err.message}\n`);
-  }
-
   const job = createCompanionJob({
     prefix: "scoping-review",
     kind: "task",
@@ -1332,6 +1325,7 @@ async function handleScopingAdversarialReview(argv) {
         model: normalizeRequestedModel(options.model),
         effort: normalizeReasoningEffort(options.effort),
         write: true,
+        incrementalWrite: true,
         expectFiles: [outputPath],
         onProgress: progress
       }),

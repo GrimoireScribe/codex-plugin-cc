@@ -1344,12 +1344,19 @@ export async function runCodexExecTask(cwd, options = {}) {
     }
   };
 
+  // Incremental-write reviews (spec-adversarial-review, scoping-adversarial-review)
+  // emit intermediate agent_message items as planning narration between apply_patch
+  // calls. gpt-5.4 deliberates for longer than 5s between sections. Use a longer
+  // finalization window so those reviews can complete all sections before the
+  // process is killed.
+  const finalizationTimeoutMs = options.finalizationTimeoutMs ?? 5000;
+
   const scheduleFinalizationTimer = () => {
     clearFinalizationTimer();
     finalizationTimer = setTimeout(() => {
       finalizedAfterMessage = true;
       killChild();
-    }, 5000);
+    }, finalizationTimeoutMs);
   };
 
   /** @type {string[]} */
