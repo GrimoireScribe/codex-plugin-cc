@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { parseExpectFiles, decideTaskExit } from "./lib/expect-files.mjs";
+import os from "node:os";
 import {
     DEFAULT_CONTINUE_PROMPT,
     findLatestTaskThread,
@@ -136,6 +137,141 @@ After reading this block, proceed with the user's actual request below.
 ---
 
 `;
+
+// ---------------------------------------------------------------------------
+// Companion-layer output persistence
+// Mirrors the same mechanism in the Gemini companion. When Codex exhausts its
+// context window before it can emit the shell_command write call, it exits 0
+// with the review text in its final message but nothing on disk. These helpers
+// let the companion do the write in Node.js instead, using the `save to <path>`
+// instruction parsed directly from the task prompt.
+// ---------------------------------------------------------------------------
+
+function trimSavePathCandidate(candidate) {
+  return String(candidate ?? "")
+    .trim()
+    .replace(/^[`"']+|[`"']+$/g, "")
+    .replace(/[.,;:!?]+$/g, "")
+    .trim();
+}
+
+function extractFileLikeSavePath(candidate) {
+  const match = String(candidate ?? "").match(
+    /^(?<path>[\s\S]*\.[A-Za-z0-9]{1,8})(?=[.,;:!?]?(?:\s|$))/
+  );
+  return trimSavePathCandidate(match?.groups?.path ?? "");
+}
+
+function normalizePathForComparison(candidate, cwd = process.cwd()) {
+  const text = String(candidate ?? "").trim();
+  if (!text) return null;
+  const resolved = path.isAbsolute(text) ? path.resolve(text) : path.resolve(cwd, text);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function normalizeRequestedSavePath(candidate) {
+  if (process.platform !== "win32") {
+    return path.resolve(candidate);
+  }
+  const normalized = String(candidate ?? "").trim().replace(/\\/g, "/");
+  if (!normalized.startsWith("/")) {
+    return path.resolve(candidate);
+  }
+  if (normalized === "/tmp" || normalized.startsWith("/tmp/")) {
+    const relativePath = normalized.slice("/tmp".length).replace(/^\/+/, "");
+    return path.resolve(os.tmpdir(), relativePath);
+  }
+  const homeMatch = normalized.match(/^\/home\/([^/]+)(?:\/(.*))?$/);
+  if (homeMatch) {
+    const [, user, tail = ""] = homeMatch;
+    const profileDir = process.env.USERPROFILE ?? "";
+    const expectedUser =
+      path.basename(profileDir) || process.env.USERNAME || process.env.USER || "";
+    if (profileDir && expectedUser && user.toLowerCase() === expectedUser.toLowerCase()) {
+      return path.resolve(profileDir, tail.replace(/\//g, path.sep));
+    }
+  }
+  const cygdriveMatch = normalized.match(/^\/cygdrive\/([a-zA-Z])(?:\/(.*))?$/);
+  if (cygdriveMatch) {
+    const [, drive, tail = ""] = cygdriveMatch;
+    return path.resolve(`${drive.toUpperCase()}:\\${tail.replace(/\//g, "\\")}`);
+  }
+  const rootDriveMatch = normalized.match(/^\/([a-zA-Z])(?:\/(.*))?$/);
+  if (rootDriveMatch) {
+    const [, drive, tail = ""] = rootDriveMatch;
+    return path.resolve(`${drive.toUpperCase()}:\\${tail.replace(/\//g, "\\")}`);
+  }
+  return path.resolve(candidate);
+}
+
+function refineRequestedSavePath(candidate) {
+  const rawCandidate = trimSavePathCandidate(candidate);
+  if (!rawCandidate) return null;
+  let current = rawCandidate;
+  while (current) {
+    const trimmed = trimSavePathCandidate(current);
+    if (trimmed) {
+      const fileLike = extractFileLikeSavePath(trimmed);
+      if (fileLike) return normalizeRequestedSavePath(fileLike);
+      const resolved = normalizeRequestedSavePath(trimmed);
+      try {
+        if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) return resolved;
+      } catch { /* fall through */ }
+      const parentDir = path.dirname(resolved);
+      if (parentDir && fs.existsSync(parentDir)) return resolved;
+    }
+    const nextBoundary = current.lastIndexOf(" ");
+    if (nextBoundary === -1) break;
+    current = current.slice(0, nextBoundary).trimEnd();
+  }
+  return normalizeRequestedSavePath(rawCandidate);
+}
+
+function extractRequestedSavePath(prompt) {
+  const text = String(prompt ?? "");
+  if (!text.trim()) return null;
+  const patterns = [
+    /save\b[\s\S]{0,300}?\bto\s+[`"'](?<path>(?:[A-Za-z]:[\\/]|\/)[^`"']+)[`"']/i,
+    /save[- ]output\b[\s\S]{0,120}?[`"'](?<path>(?:[A-Za-z]:[\\/]|\/)[^`"']+)[`"']/i,
+    /\b(?:save|write)\b[\s\S]{0,300}?[`"'](?<path>(?:[A-Za-z]:[\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^`"']+)[`"']/i,
+    /save\b[\s\S]{0,300}?\bto\s+(?<path>(?:[A-Za-z]:[\\/]|\/)[^\r\n`"')\]]+)/i,
+    /save[- ]output\b[\s\S]{0,120}?(?<path>(?:[A-Za-z]:[\\/]|\/)[^\r\n`"')\]]+)/i,
+    /\b(?:save|write)\b[\s\S]{0,300}?(?<path>(?:[A-Za-z]:[\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^\r\n`"')\]]+)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    const candidate = match?.groups?.path?.trim();
+    if (candidate) return refineRequestedSavePath(candidate);
+  }
+  return null;
+}
+
+function persistTaskOutput(savePath, rawOutput) {
+  if (!savePath) return null;
+  try {
+    fs.mkdirSync(path.dirname(savePath), { recursive: true });
+    fs.writeFileSync(savePath, rawOutput, "utf8");
+    return {
+      ok: true,
+      path: savePath,
+      message: `[PLUGIN-WRITE] Saved Codex output to: ${savePath}`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      path: savePath,
+      message: `[PLUGIN-WRITE FAIL] Could not save Codex output to ${savePath}: ${error.message}`
+    };
+  }
+}
+
+function maybePersistTaskOutput({ allowWrite = false, rawOutput = "", savePath = null, savePathAlreadyTouched = false } = {}) {
+  if (!savePath || !rawOutput || !allowWrite) return null;
+  if (savePathAlreadyTouched) return null;
+  return persistTaskOutput(savePath, rawOutput);
+}
+
+// ---------------------------------------------------------------------------
 
 function readPositiveEnvInt(name, fallback) {
   const raw = process.env[name];
@@ -628,10 +764,38 @@ async function executeTaskRun(request) {
   const rawOutput = typeof result.finalMessage === "string" ? result.finalMessage : "";
   const failureMessage = result.error?.message ?? result.stderr ?? "";
 
+  // Companion-layer output persistence: if the prompt contained a "save to <path>"
+  // instruction and Codex returned output but didn't write the file itself (context
+  // exhaustion is the main cause), the companion writes it here in Node.js.
+  const touchedFiles = [
+    ...new Set((Array.isArray(result.touchedFiles) ? result.touchedFiles : []).map(String))
+  ];
+  const requestedSavePath = extractRequestedSavePath(request.prompt);
+  const requestedSavePathKey = normalizePathForComparison(requestedSavePath);
+  const savePathAlreadyTouched = requestedSavePathKey
+    ? touchedFiles.some(
+        (f) => normalizePathForComparison(f, workspaceRoot) === requestedSavePathKey
+      )
+    : false;
+  const saveOutput = maybePersistTaskOutput({
+    allowWrite: Boolean(request.write),
+    rawOutput,
+    savePath: requestedSavePath,
+    savePathAlreadyTouched
+  });
+  if (saveOutput?.ok && saveOutput.path) {
+    touchedFiles.push(saveOutput.path);
+  }
+  const normalizedTouchedFiles = [...new Set(touchedFiles)];
+
   // Ground-truth verification: Codex self-reports are unreliable. If the caller
   // declared expected deliverable paths, the filesystem is authoritative.
+  // If the companion write succeeded, treat the save path as present for exit
+  // decision purposes (avoids double-fail when Codex ran out of context but
+  // the companion rescued the output).
   const codexExit = typeof result.status === "number" ? result.status : (result.status ? 1 : 0);
-  const decision = decideTaskExit(codexExit, request.expectFiles ?? []);
+  const effectiveCodExExit = saveOutput?.ok && rawOutput.trim() ? 0 : codexExit;
+  const decision = decideTaskExit(effectiveCodExExit, request.expectFiles ?? []);
   const exitStatus = decision.exitStatus;
   const verificationMessage = decision.verificationMessage;
   const expected = decision.expected;
@@ -640,6 +804,7 @@ async function executeTaskRun(request) {
     {
       rawOutput,
       failureMessage,
+      saveOutput,
       reasoningSummary: result.reasoningSummary
     },
     {
@@ -659,7 +824,8 @@ async function executeTaskRun(request) {
     codexExitStatus: codexExit,
     threadId: result.threadId,
     rawOutput,
-    touchedFiles: result.touchedFiles,
+    touchedFiles: normalizedTouchedFiles,
+    saveOutput,
     reasoningSummary: result.reasoningSummary,
     sandboxMode: request.write ? "workspace-write" : "read-only",
     commandFailures: result.commandFailures ?? [],
