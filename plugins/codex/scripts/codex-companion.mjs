@@ -351,6 +351,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [--expect-file <path[,path...]>] [prompt]",
       "  node scripts/codex-companion.mjs spec-adversarial-review --spec <path> --output <path> [--model <model|spark>] [--effort <level>]",
+      "  node scripts/codex-companion.mjs scoping-adversarial-review --spec <path> --output <path> [--model <model|spark>] [--effort <level>]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -1236,6 +1237,58 @@ async function handleSpecAdversarialReview(argv) {
   );
 }
 
+async function handleScopingAdversarialReview(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["spec", "output", "model", "effort", "cwd"],
+    booleanOptions: ["json", "background"]
+  });
+
+  if (!options.spec) {
+    throw new Error("scoping-adversarial-review requires --spec <absolute path to scoping plan>.");
+  }
+  if (!options.output) {
+    throw new Error("scoping-adversarial-review requires --output <absolute path for review output>.");
+  }
+
+  const specPath = path.resolve(options.spec);
+  const outputPath = path.resolve(options.output);
+  const scopingSlug = path.basename(specPath, path.extname(specPath));
+
+  const template = loadPromptTemplate(ROOT_DIR, "scoping-adversarial-review");
+  const prompt = interpolateTemplate(template, {
+    SPEC_PATH: specPath,
+    OUTPUT_PATH: outputPath,
+    TARGET_LABEL: `scoping plan: ${scopingSlug}`,
+    USER_FOCUS: "Framing review — challenge the shape of the phase, not individual ticket phrasing. Is the phase scoped around the right problem? Are load-bearing architectural decisions justified? Is the child decomposition and ordering correct?"
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const job = createCompanionJob({
+    prefix: "scoping-review",
+    kind: "task",
+    title: `Codex Scoping Review: ${scopingSlug}`,
+    workspaceRoot,
+    jobClass: "task",
+    summary: `Scoping adversarial review of ${scopingSlug}`
+  });
+
+  await runForegroundCommand(
+    job,
+    (progress) =>
+      executeTaskRun({
+        cwd,
+        prompt,
+        model: options.model,
+        effort: options.effort,
+        write: true,
+        expectFiles: [outputPath],
+        onProgress: progress
+      }),
+    { json: options.json }
+  );
+}
+
 async function handleTaskWorker(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "job-id"]
@@ -1446,6 +1499,9 @@ async function main() {
       break;
     case "spec-adversarial-review":
       await handleSpecAdversarialReview(argv);
+      break;
+    case "scoping-adversarial-review":
+      await handleScopingAdversarialReview(argv);
       break;
     case "task-worker":
       await handleTaskWorker(argv);
