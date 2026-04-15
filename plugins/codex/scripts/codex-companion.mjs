@@ -231,18 +231,15 @@ function refineRequestedSavePath(candidate) {
 function extractRequestedSavePath(prompt) {
   const text = String(prompt ?? "");
   if (!text.trim()) return null;
-  // NOTE on character class escaping: [A-Za-z]:[\\\/] — inside a character class,
-  // a single backslash is written as \\ to match a literal backslash; / needs no
-  // escaping inside a character class but is included for forward-slash Windows paths.
-  // Previously this read [\\/] which JavaScript parses as [\/] (forward-slash only),
-  // silently breaking all regex patterns on Windows backslash paths. Fixed to [\\\/].
+  // Character class [\\/] matches either a literal backslash or a forward slash in JS.
+  // This form works correctly for Windows paths (either separator) and for POSIX paths.
   const patterns = [
-    /save\b[\s\S]{0,300}?\bto\s+[`"'](?<path>(?:[A-Za-z]:[\\\/]|\/)[^`"']+)[`"']/i,
-    /save[- ]output\b[\s\S]{0,120}?[`"'](?<path>(?:[A-Za-z]:[\\\/]|\/)[^`"']+)[`"']/i,
-    /\b(?:save|write)\b[\s\S]{0,300}?[`"'](?<path>(?:[A-Za-z]:[\\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^`"']+)[`"']/i,
-    /save\b[\s\S]{0,300}?\bto\s+(?<path>(?:[A-Za-z]:[\\\/]|\/)[^\r\n`"')\]]+)/i,
-    /save[- ]output\b[\s\S]{0,120}?(?<path>(?:[A-Za-z]:[\\\/]|\/)[^\r\n`"')\]]+)/i,
-    /\b(?:save|write)\b[\s\S]{0,300}?(?<path>(?:[A-Za-z]:[\\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^\r\n`"')\]]+)/i,
+    /save\b[\s\S]{0,300}?\bto\s+[`"'](?<path>(?:[A-Za-z]:[\\/]|\/)[^`"']+)[`"']/i,
+    /save[- ]output\b[\s\S]{0,120}?[`"'](?<path>(?:[A-Za-z]:[\\/]|\/)[^`"']+)[`"']/i,
+    /\b(?:save|write)\b[\s\S]{0,300}?[`"'](?<path>(?:[A-Za-z]:[\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^`"']+)[`"']/i,
+    /save\b[\s\S]{0,300}?\bto\s+(?<path>(?:[A-Za-z]:[\\/]|\/)[^\r\n`"')\]]+)/i,
+    /save[- ]output\b[\s\S]{0,120}?(?<path>(?:[A-Za-z]:[\\/]|\/)[^\r\n`"')\]]+)/i,
+    /\b(?:save|write)\b[\s\S]{0,300}?(?<path>(?:[A-Za-z]:[\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^\r\n`"')\]]+)/i,
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -881,13 +878,18 @@ async function executeTaskRun(request) {
   // so POAgent / codex-stall-reroute can detect incomplete reviews without reading the
   // review content themselves.
   // resolvedSavePath: prefer the path the companion wrote (saveOutput.path), fall back
-  // to requestedSavePath if Codex touched it, then fall back to the first expectFiles
-  // entry (for incremental-write commands where requestedSavePath may be null due to the
-  // regex not matching a Windows backslash path — expectFiles is always explicitly set).
+  // to requestedSavePath if Codex touched it. For incrementalWrite tasks (spec/scoping
+  // reviews), also fall back to expectFiles[0] — these tasks always set expectFiles to
+  // [outputPath] and require the REVIEW COMPLETE marker. Do NOT apply this fallback to
+  // generic --expect-file task runs, where expectFiles may contain any deliverable path
+  // that isn't expected to end with a review marker (e.g., a JSON report, a refactored
+  // source file). Treating those as "incomplete" would produce false-positive failures.
   const resolvedSavePath =
     saveOutput?.path ??
     (savePathAlreadyTouched ? requestedSavePath : null) ??
-    (Array.isArray(request.expectFiles) && request.expectFiles.length > 0 ? request.expectFiles[0] : null);
+    (request.incrementalWrite && Array.isArray(request.expectFiles) && request.expectFiles.length > 0
+      ? request.expectFiles[0]
+      : null);
   const completionMarkerMissing = resolvedSavePath
     ? !checkCompletionMarker(resolvedSavePath)
     : false;

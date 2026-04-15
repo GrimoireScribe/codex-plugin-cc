@@ -1550,11 +1550,19 @@ export async function runCodexExecTask(cwd, options = {}) {
   const cleanedStderr = cleanCodexStderr(stderr);
   try {
     if (fs.existsSync(outputPath)) {
-      finalMessage = fs.readFileSync(outputPath, "utf8");
-      // Sync lastMessage from the authoritative file. The file is written by the
-      // Codex CLI and is more reliable than the stdout-event-sourced in-memory
-      // accumulation — prefer it for the review path's JSON parse.
-      lastMessage = finalMessage;
+      const fileContent = fs.readFileSync(outputPath, "utf8");
+      // Only overwrite the in-memory accumulated messages if the file actually has
+      // content. Codex can leave a zero-byte --output-last-message file when it crashes
+      // or is killed mid-stream (e.g., SIGTERM from finalization timer before the CLI
+      // flushes). Clobbering finalMessage/lastMessage with "" would destroy any real
+      // content captured from the event stream.
+      if (fileContent.length > 0) {
+        finalMessage = fileContent;
+        // Sync lastMessage from the authoritative file. The file is written by the
+        // Codex CLI and is more reliable than the stdout-event-sourced in-memory
+        // accumulation — prefer it for the review path's JSON parse.
+        lastMessage = fileContent;
+      }
     }
   } finally {
     if (fs.existsSync(outputPath)) {
