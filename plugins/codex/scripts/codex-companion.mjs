@@ -752,6 +752,7 @@ async function executeTaskRun(request) {
     ? buildWriteTaskPrompt(request.prompt)
     : buildReadOnlyInvestigationPrompt(request.prompt);
 
+  const taskStartTime = Date.now();
   const result = await runCodexExecTask(workspaceRoot, {
     resumeThreadId,
     prompt: taskPrompt || (resumeThreadId ? DEFAULT_CONTINUE_PROMPT : ""),
@@ -771,12 +772,18 @@ async function executeTaskRun(request) {
     ...new Set((Array.isArray(result.touchedFiles) ? result.touchedFiles : []).map(String))
   ];
   const requestedSavePath = extractRequestedSavePath(request.prompt);
-  const requestedSavePathKey = normalizePathForComparison(requestedSavePath);
-  const savePathAlreadyTouched = requestedSavePathKey
-    ? touchedFiles.some(
-        (f) => normalizePathForComparison(f, workspaceRoot) === requestedSavePathKey
-      )
-    : false;
+  // Use mtime to detect whether Codex wrote the file itself during this run.
+  // touchedFiles is always [] on the exec path (only populated on app-server path),
+  // so we can't rely on it. Instead we stat the file and compare its mtime to the
+  // task start time. If the file is newer, Codex wrote it — skip the companion write.
+  const savePathAlreadyTouched = (() => {
+    if (!requestedSavePath) return false;
+    try {
+      return fs.statSync(requestedSavePath).mtimeMs >= taskStartTime;
+    } catch {
+      return false;
+    }
+  })();
   const saveOutput = maybePersistTaskOutput({
     allowWrite: Boolean(request.write),
     rawOutput,

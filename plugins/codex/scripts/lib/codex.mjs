@@ -1428,7 +1428,14 @@ export async function runCodexExecTask(cwd, options = {}) {
           const item = event.item ?? {};
           const itemType = normalizeExecItemType(item.type);
           if (itemType === "agent_message" && typeof item.text === "string") {
-            finalMessage = item.text;
+            // Accumulate all agent messages so the companion has the full session
+            // output, not just the last turn's commentary. This is critical for
+            // companion-layer persistence: when Codex exhausts context before
+            // writing a file, the review content is in an earlier agent_message
+            // and would be lost if we only kept the final one.
+            finalMessage = finalMessage
+              ? `${finalMessage}\n\n${item.text}`
+              : item.text;
             emitProgress(options.onProgress, "Assistant produced a final message.", "finalizing");
             scheduleFinalizationTimer();
             break;
