@@ -82,7 +82,9 @@ test("continue is not exposed as a user-facing command", () => {
     "rescue.md",
     "result.md",
     "review.md",
+    "scoping-adversarial-review.md",
     "setup.md",
+    "spec-adversarial-review.md",
     "status.md"
   ]);
 });
@@ -131,7 +133,7 @@ test("rescue command absorbs continue semantics", () => {
   assert.match(agent, /If the user asks for `spark`, map that to `--model gpt-5\.3-codex-spark`/i);
   assert.match(agent, /If the user asks for a concrete model name such as `gpt-5\.4-mini`, pass it through with `--model`/i);
   assert.match(agent, /Return the stdout of the `codex-companion` command exactly as-is/i);
-  assert.match(agent, /If the Bash call fails or Codex cannot be invoked, return nothing/i);
+  assert.match(agent, /If the Bash call fails.*retry ONCE/i);
   assert.match(agent, /gpt-5-4-prompting/);
   assert.match(agent, /only to tighten the user's request into a better Codex prompt/i);
   assert.match(agent, /Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work/i);
@@ -169,9 +171,9 @@ test("result and cancel commands are exposed as deterministic runtime entrypoint
   const resultHandling = read("skills/codex-result-handling/SKILL.md");
 
   assert.match(result, /disable-model-invocation:\s*true/);
-  assert.match(result, /codex-companion\.mjs" result \$ARGUMENTS/);
+  assert.match(result, /codex-companion\.mjs" result/);
   assert.match(cancel, /disable-model-invocation:\s*true/);
-  assert.match(cancel, /codex-companion\.mjs" cancel \$ARGUMENTS/);
+  assert.match(cancel, /codex-companion\.mjs" cancel/);
   assert.match(resultHandling, /do not turn a failed or incomplete Codex run into a Claude-side implementation attempt/i);
   assert.match(resultHandling, /if Codex was never successfully invoked, do not generate a substitute answer at all/i);
 });

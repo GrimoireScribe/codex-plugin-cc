@@ -1344,12 +1344,16 @@ export async function runCodexExecTask(cwd, options = {}) {
     }
   };
 
-  // Incremental-write reviews (spec-adversarial-review, scoping-adversarial-review)
-  // emit intermediate agent_message items as planning narration between apply_patch
-  // calls. gpt-5.4 deliberates for longer than 5s between sections. Use a longer
-  // finalization window so those reviews can complete all sections before the
-  // process is killed.
-  const finalizationTimeoutMs = options.finalizationTimeoutMs ?? 5000;
+  // The finalization timer kills the child process N ms after the last agent_message,
+  // if no new item.started event arrives in that window. It is a fallback for when
+  // turn.completed never fires (e.g. Codex exits without emitting the event).
+  //
+  // Default is 30s. The previous 5s default was too aggressive — gpt-5.4 can take
+  // longer than 5s to deliberate between tool calls, causing the child to be killed
+  // mid-turn. Incremental-write reviews (spec/scoping-adversarial-review) use 60s
+  // (passed explicitly via options.finalizationTimeoutMs) because the model narrates
+  // between each apply_patch section with potentially long think gaps.
+  const finalizationTimeoutMs = options.finalizationTimeoutMs ?? 30000;
 
   const scheduleFinalizationTimer = () => {
     clearFinalizationTimer();

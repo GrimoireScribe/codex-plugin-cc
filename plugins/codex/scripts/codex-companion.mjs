@@ -231,13 +231,18 @@ function refineRequestedSavePath(candidate) {
 function extractRequestedSavePath(prompt) {
   const text = String(prompt ?? "");
   if (!text.trim()) return null;
+  // NOTE on character class escaping: [A-Za-z]:[\\\/] — inside a character class,
+  // a single backslash is written as \\ to match a literal backslash; / needs no
+  // escaping inside a character class but is included for forward-slash Windows paths.
+  // Previously this read [\\/] which JavaScript parses as [\/] (forward-slash only),
+  // silently breaking all regex patterns on Windows backslash paths. Fixed to [\\\/].
   const patterns = [
-    /save\b[\s\S]{0,300}?\bto\s+[`"'](?<path>(?:[A-Za-z]:[\\/]|\/)[^`"']+)[`"']/i,
-    /save[- ]output\b[\s\S]{0,120}?[`"'](?<path>(?:[A-Za-z]:[\\/]|\/)[^`"']+)[`"']/i,
-    /\b(?:save|write)\b[\s\S]{0,300}?[`"'](?<path>(?:[A-Za-z]:[\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^`"']+)[`"']/i,
-    /save\b[\s\S]{0,300}?\bto\s+(?<path>(?:[A-Za-z]:[\\/]|\/)[^\r\n`"')\]]+)/i,
-    /save[- ]output\b[\s\S]{0,120}?(?<path>(?:[A-Za-z]:[\\/]|\/)[^\r\n`"')\]]+)/i,
-    /\b(?:save|write)\b[\s\S]{0,300}?(?<path>(?:[A-Za-z]:[\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^\r\n`"')\]]+)/i,
+    /save\b[\s\S]{0,300}?\bto\s+[`"'](?<path>(?:[A-Za-z]:[\\\/]|\/)[^`"']+)[`"']/i,
+    /save[- ]output\b[\s\S]{0,120}?[`"'](?<path>(?:[A-Za-z]:[\\\/]|\/)[^`"']+)[`"']/i,
+    /\b(?:save|write)\b[\s\S]{0,300}?[`"'](?<path>(?:[A-Za-z]:[\\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^`"']+)[`"']/i,
+    /save\b[\s\S]{0,300}?\bto\s+(?<path>(?:[A-Za-z]:[\\\/]|\/)[^\r\n`"')\]]+)/i,
+    /save[- ]output\b[\s\S]{0,120}?(?<path>(?:[A-Za-z]:[\\\/]|\/)[^\r\n`"')\]]+)/i,
+    /\b(?:save|write)\b[\s\S]{0,300}?(?<path>(?:[A-Za-z]:[\\\/]|\/tmp\/|\/cygdrive\/[A-Za-z]\/|\/[A-Za-z]\/|\/home\/)[^\r\n`"')\]]+)/i,
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);
@@ -770,11 +775,19 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  // LOCAL PATCH (2026-04-08): inject POAgent rescue-hygiene block into every task
-  // prompt. Idempotent — no-op if the marker is already present. See helper
+  // LOCAL PATCH (2026-04-08): inject POAgent rescue-hygiene block into write task
+  // prompts. Idempotent — no-op if the marker is already present. See helper
   // definition near top of file for full rationale.
+  //
+  // EXCEPTION: incrementalWrite tasks (spec/scoping-adversarial-review) must NOT
+  // receive the rescue-hygiene block. That block instructs the model to "return the
+  // full artifact inline in a fenced markdown block" and "do NOT persist via Bash
+  // heredocs" — which directly contradicts the incremental-write protocol that tells
+  // the model to call apply_patch section-by-section. The two instructions are in
+  // direct conflict, and gpt-5.4 has been observed obeying the hygiene block (emitting
+  // plan narration) instead of the apply_patch protocol (writing sections to disk).
   const taskPrompt = request.write
-    ? buildWriteTaskPrompt(request.prompt)
+    ? (request.incrementalWrite ? request.prompt : buildWriteTaskPrompt(request.prompt))
     : buildReadOnlyInvestigationPrompt(request.prompt);
 
   // Record the save path and its pre-task mtime before the run starts.
@@ -867,7 +880,14 @@ async function executeTaskRun(request) {
   // the review overflowed mid-write — the file is partial. Surface this in the payload
   // so POAgent / codex-stall-reroute can detect incomplete reviews without reading the
   // review content themselves.
-  const resolvedSavePath = saveOutput?.path ?? (savePathAlreadyTouched ? requestedSavePath : null);
+  // resolvedSavePath: prefer the path the companion wrote (saveOutput.path), fall back
+  // to requestedSavePath if Codex touched it, then fall back to the first expectFiles
+  // entry (for incremental-write commands where requestedSavePath may be null due to the
+  // regex not matching a Windows backslash path — expectFiles is always explicitly set).
+  const resolvedSavePath =
+    saveOutput?.path ??
+    (savePathAlreadyTouched ? requestedSavePath : null) ??
+    (Array.isArray(request.expectFiles) && request.expectFiles.length > 0 ? request.expectFiles[0] : null);
   const completionMarkerMissing = resolvedSavePath
     ? !checkCompletionMarker(resolvedSavePath)
     : false;
