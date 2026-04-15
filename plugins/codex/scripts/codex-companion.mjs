@@ -690,7 +690,11 @@ async function executeReviewRun(request) {
     onProgress: request.onProgress,
     idleTimeoutMs: TASK_IDLE_TIMEOUT_MS
   });
-  const parsed = parseStructuredOutput(result.finalMessage, {
+  // Use lastMessage (the final agent_message only) for JSON parsing — the review
+  // schema expects a single JSON blob, not the accumulated multi-message string.
+  // finalMessage (accumulated) goes into stdout for debugging purposes only.
+  const reviewMessage = result.lastMessage || result.finalMessage;
+  const parsed = parseStructuredOutput(reviewMessage, {
     status: result.status,
     failureMessage: result.error?.message ?? result.stderr
   });
@@ -727,7 +731,7 @@ async function executeReviewRun(request) {
       targetLabel: context.target.label,
       reasoningSummary: result.reasoningSummary
     }),
-    summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(result.finalMessage, `${reviewName} finished.`),
+    summary: parsed.parsed?.summary ?? parsed.parseError ?? firstMeaningfulLine(reviewMessage, `${reviewName} finished.`),
     jobTitle: `Codex ${reviewName}`,
     jobClass: "review",
     targetLabel: context.target.label
@@ -766,7 +770,21 @@ async function executeTaskRun(request) {
     ? buildWriteTaskPrompt(request.prompt)
     : buildReadOnlyInvestigationPrompt(request.prompt);
 
-  const taskStartTime = Date.now();
+  // Record the save path and its pre-task mtime before the run starts.
+  // Comparing post-task mtime against the pre-task mtime (rather than Date.now())
+  // eliminates the FS timestamp granularity race: a file last written 1ms before
+  // Date.now() would be misidentified as "Codex just wrote it" if we compared
+  // against the start clock rather than the actual prior state.
+  const requestedSavePath = extractRequestedSavePath(request.prompt);
+  const preTaskMtime = (() => {
+    if (!requestedSavePath) return null;
+    try {
+      return fs.statSync(requestedSavePath).mtimeMs;
+    } catch {
+      return null; // file did not exist before the task
+    }
+  })();
+
   const result = await runCodexExecTask(workspaceRoot, {
     resumeThreadId,
     prompt: taskPrompt || (resumeThreadId ? DEFAULT_CONTINUE_PROMPT : ""),
@@ -785,15 +803,17 @@ async function executeTaskRun(request) {
   const touchedFiles = [
     ...new Set((Array.isArray(result.touchedFiles) ? result.touchedFiles : []).map(String))
   ];
-  const requestedSavePath = extractRequestedSavePath(request.prompt);
   // Use mtime to detect whether Codex wrote the file itself during this run.
   // touchedFiles is always [] on the exec path (only populated on app-server path),
-  // so we can't rely on it. Instead we stat the file and compare its mtime to the
-  // task start time. If the file is newer, Codex wrote it — skip the companion write.
+  // so we can't rely on it. Instead compare the post-task mtime against the pre-task
+  // mtime captured before the run: if it changed, Codex wrote the file.
   const savePathAlreadyTouched = (() => {
     if (!requestedSavePath) return false;
     try {
-      return fs.statSync(requestedSavePath).mtimeMs >= taskStartTime;
+      const postTaskMtime = fs.statSync(requestedSavePath).mtimeMs;
+      // If preTaskMtime is null, file did not exist before — Codex created it.
+      // If mtime changed, Codex (or something) wrote it during the run.
+      return preTaskMtime === null ? true : postTaskMtime > preTaskMtime;
     } catch {
       return false;
     }
@@ -826,7 +846,17 @@ async function executeTaskRun(request) {
   // decision purposes (avoids double-fail when Codex ran out of context but
   // the companion rescued the output).
   const codexExit = typeof result.status === "number" ? result.status : (result.status ? 1 : 0);
-  const effectiveCodExExit = saveOutput?.ok && rawOutput.trim() ? 0 : codexExit;
+  // Override non-zero exit only when the companion rescued output for a path that
+  // was declared as an expected deliverable. A companion write to an undeclared path
+  // does not justify suppressing a real Codex failure.
+  const savePathIsExpected =
+    saveOutput?.ok &&
+    saveOutput?.path &&
+    Array.isArray(request.expectFiles) &&
+    request.expectFiles.some(
+      (f) => path.resolve(String(f)) === path.resolve(saveOutput.path)
+    );
+  const effectiveCodExExit = savePathIsExpected ? 0 : codexExit;
   const decision = decideTaskExit(effectiveCodExExit, request.expectFiles ?? []);
   const exitStatus = decision.exitStatus;
   const verificationMessage = decision.verificationMessage;

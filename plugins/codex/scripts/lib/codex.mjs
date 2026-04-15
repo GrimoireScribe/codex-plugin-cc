@@ -1313,6 +1313,7 @@ export async function runCodexExecTask(cwd, options = {}) {
   const mcpToolCalls = [];
   const dynamicToolCalls = [];
   let finalMessage = "";
+  let lastMessage = "";
   let threadId = null;
   let turnId = null;
   let stderr = "";
@@ -1433,6 +1434,9 @@ export async function runCodexExecTask(cwd, options = {}) {
             // companion-layer persistence: when Codex exhausts context before
             // writing a file, the review content is in an earlier agent_message
             // and would be lost if we only kept the final one.
+            // lastMessage tracks only the most recent agent_message — used by the
+            // review path which expects the final JSON blob, not an accumulated string.
+            lastMessage = item.text;
             finalMessage = finalMessage
               ? `${finalMessage}\n\n${item.text}`
               : item.text;
@@ -1551,6 +1555,7 @@ export async function runCodexExecTask(cwd, options = {}) {
     threadId,
     turnId,
     finalMessage,
+    lastMessage,
     stderr: cleanedStderr,
     touchedFiles: [],
     reasoningSummary: [],
