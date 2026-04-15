@@ -275,11 +275,16 @@ function maybePersistTaskOutput({ allowWrite = false, rawOutput = "", savePath =
 // Returns true if the file at filePath ends with the REVIEW_COMPLETE_MARKER.
 // Returns false if the file is missing, unreadable, or the marker is absent.
 // Used to distinguish a partial incremental-write file from a fully completed one.
+//
+// Uses endsWith (after trimming trailing whitespace) rather than includes so that
+// a marker left in the middle of a file — e.g. a prior complete review followed
+// by partial retry content — is not treated as a completed review. The marker must
+// be the last substantive content in the file.
 function checkCompletionMarker(filePath) {
   if (!filePath) return false;
   try {
     const content = fs.readFileSync(filePath, "utf8");
-    return content.includes(REVIEW_COMPLETE_MARKER);
+    return content.trimEnd().endsWith(REVIEW_COMPLETE_MARKER);
   } catch {
     return false;
   }
@@ -777,13 +782,19 @@ async function executeTaskRun(request) {
   // eliminates the FS timestamp granularity race: a file last written 1ms before
   // Date.now() would be misidentified as "Codex just wrote it" if we compared
   // against the start clock rather than the actual prior state.
+  //
+  // null means "file did not exist (ENOENT)" — treated downstream as "Codex created it."
+  // For any other stat error (EACCES, network drive, etc.) we use -1 as a sentinel
+  // meaning "file existence unknown" — the post-task check will then require a strict
+  // mtime > 0 rather than a "file created" inference.
   const requestedSavePath = extractRequestedSavePath(request.prompt);
   const preTaskMtime = (() => {
     if (!requestedSavePath) return null;
     try {
       return fs.statSync(requestedSavePath).mtimeMs;
-    } catch {
-      return null; // file did not exist before the task
+    } catch (err) {
+      if (err.code === "ENOENT") return null; // file did not exist before the task
+      return -1; // file existence unknown due to non-ENOENT error
     }
   })();
 
@@ -809,13 +820,19 @@ async function executeTaskRun(request) {
   // touchedFiles is always [] on the exec path (only populated on app-server path),
   // so we can't rely on it. Instead compare the post-task mtime against the pre-task
   // mtime captured before the run: if it changed, Codex wrote the file.
+  //
+  // preTaskMtime semantics:
+  //   null  → file did not exist (ENOENT) → if it now exists, Codex created it
+  //   -1    → pre-task stat failed for non-ENOENT reason (unknown prior state)
+  //           → require strict mtime > 0 and treat as "not touched" when uncertain
+  //   >=0   → known prior mtime → Codex wrote it iff post-task mtime > preTaskMtime
   const savePathAlreadyTouched = (() => {
     if (!requestedSavePath) return false;
     try {
       const postTaskMtime = fs.statSync(requestedSavePath).mtimeMs;
-      // If preTaskMtime is null, file did not exist before — Codex created it.
-      // If mtime changed, Codex (or something) wrote it during the run.
-      return preTaskMtime === null ? true : postTaskMtime > preTaskMtime;
+      if (preTaskMtime === null) return true; // file did not exist before; Codex created it
+      if (preTaskMtime === -1) return postTaskMtime > 0; // prior state unknown; require positive mtime
+      return postTaskMtime > preTaskMtime;
     } catch {
       return false;
     }
@@ -851,12 +868,14 @@ async function executeTaskRun(request) {
   // Override non-zero exit only when the companion rescued output for a path that
   // was declared as an expected deliverable. A companion write to an undeclared path
   // does not justify suppressing a real Codex failure.
+  // Compare paths case-insensitively on Windows (NTFS is case-insensitive).
+  // normalizePathForComparison already lowercases on win32 — use it on both sides.
   const savePathIsExpected =
     saveOutput?.ok &&
     saveOutput?.path &&
     Array.isArray(request.expectFiles) &&
     request.expectFiles.some(
-      (f) => path.resolve(String(f)) === path.resolve(saveOutput.path)
+      (f) => normalizePathForComparison(String(f)) === normalizePathForComparison(saveOutput.path)
     );
   const effectiveCodExExit = savePathIsExpected ? 0 : codexExit;
   const decision = decideTaskExit(effectiveCodExExit, request.expectFiles ?? []);
@@ -1227,8 +1246,8 @@ async function handleSpecAdversarialReview(argv) {
       executeTaskRun({
         cwd,
         prompt,
-        model: options.model,
-        effort: options.effort,
+        model: normalizeRequestedModel(options.model),
+        effort: normalizeReasoningEffort(options.effort),
         write: true,
         expectFiles: [outputPath],
         onProgress: progress
@@ -1279,8 +1298,8 @@ async function handleScopingAdversarialReview(argv) {
       executeTaskRun({
         cwd,
         prompt,
-        model: options.model,
-        effort: options.effort,
+        model: normalizeRequestedModel(options.model),
+        effort: normalizeReasoningEffort(options.effort),
         write: true,
         expectFiles: [outputPath],
         onProgress: progress

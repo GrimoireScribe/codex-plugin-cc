@@ -1540,6 +1540,10 @@ export async function runCodexExecTask(cwd, options = {}) {
   try {
     if (fs.existsSync(outputPath)) {
       finalMessage = fs.readFileSync(outputPath, "utf8");
+      // Sync lastMessage from the authoritative file. The file is written by the
+      // Codex CLI and is more reliable than the stdout-event-sourced in-memory
+      // accumulation — prefer it for the review path's JSON parse.
+      lastMessage = finalMessage;
     }
   } finally {
     if (fs.existsSync(outputPath)) {

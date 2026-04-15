@@ -356,11 +356,11 @@ export function renderTaskResult(parsedResult, meta) {
   if (saveOutput) {
     saveBlock = `${saveOutput.message}\n\n`;
   }
-  // Warn when a file was written but the completion marker is absent — indicates
-  // the incremental-write review overflowed before finishing. The file contains
-  // partial content; the stall-reroute hook should re-run the review.
+  // Warn when a save path was resolved but the completion marker is absent — indicates
+  // the review overflowed before finishing, or the companion write failed. Does NOT
+  // assert "file written" because saveOutput.ok may be false (failed write).
   const markerWarning = completionMarkerMissing
-    ? "[PLUGIN-INCOMPLETE] Review file written but <!-- REVIEW COMPLETE --> marker is missing. The review overflowed before finishing — treat the output file as partial. Stall-reroute should re-run.\n\n"
+    ? "[PLUGIN-INCOMPLETE] <!-- REVIEW COMPLETE --> marker missing from output file. The review either overflowed before finishing or the write failed — treat the output file as partial. Stall-reroute should re-run.\n\n"
     : "";
   const diagnosticPrefix =
     diagnostics.length > 0 ? `[PLUGIN-DIAGNOSTICS]\n- ${diagnostics.join("\n- ")}\n\n` : "";
