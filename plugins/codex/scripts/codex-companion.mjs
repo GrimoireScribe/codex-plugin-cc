@@ -350,6 +350,7 @@ function printUsage() {
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
       "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [--expect-file <path[,path...]>] [prompt]",
+      "  node scripts/codex-companion.mjs spec-adversarial-review --spec <path> --output <path> [--model <model|spark>] [--effort <level>]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
       "  node scripts/codex-companion.mjs cancel [job-id] [--json]"
@@ -1183,6 +1184,58 @@ async function handleTask(argv) {
   );
 }
 
+async function handleSpecAdversarialReview(argv) {
+  const { options } = parseCommandInput(argv, {
+    valueOptions: ["spec", "output", "model", "effort", "cwd"],
+    booleanOptions: ["json", "background"]
+  });
+
+  if (!options.spec) {
+    throw new Error("spec-adversarial-review requires --spec <absolute path to spec file>.");
+  }
+  if (!options.output) {
+    throw new Error("spec-adversarial-review requires --output <absolute path for review output>.");
+  }
+
+  const specPath = path.resolve(options.spec);
+  const outputPath = path.resolve(options.output);
+  const specSlug = path.basename(specPath, path.extname(specPath));
+
+  const template = loadPromptTemplate(ROOT_DIR, "spec-adversarial-review");
+  const prompt = interpolateTemplate(template, {
+    SPEC_PATH: specPath,
+    OUTPUT_PATH: outputPath,
+    TARGET_LABEL: `spec: ${specSlug}`,
+    USER_FOCUS: "Adversarial spec review — find ambiguities, contradictions, missing edge cases, unjustified architectural premises."
+  });
+
+  const cwd = resolveCommandCwd(options);
+  const workspaceRoot = resolveCommandWorkspace(options);
+  const job = createCompanionJob({
+    prefix: "spec-review",
+    kind: "task",
+    title: `Codex Spec Review: ${specSlug}`,
+    workspaceRoot,
+    jobClass: "task",
+    summary: `Spec adversarial review of ${specSlug}`
+  });
+
+  await runForegroundCommand(
+    job,
+    (progress) =>
+      executeTaskRun({
+        cwd,
+        prompt,
+        model: options.model,
+        effort: options.effort,
+        write: true,
+        expectFiles: [outputPath],
+        onProgress: progress
+      }),
+    { json: options.json }
+  );
+}
+
 async function handleTaskWorker(argv) {
   const { options } = parseCommandInput(argv, {
     valueOptions: ["cwd", "job-id"]
@@ -1390,6 +1443,9 @@ async function main() {
       break;
     case "task":
       await handleTask(argv);
+      break;
+    case "spec-adversarial-review":
+      await handleSpecAdversarialReview(argv);
       break;
     case "task-worker":
       await handleTaskWorker(argv);
