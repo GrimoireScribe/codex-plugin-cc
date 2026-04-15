@@ -351,19 +351,26 @@ export function renderTaskResult(parsedResult, meta) {
 
   const rawOutput = typeof parsedResult?.rawOutput === "string" ? parsedResult.rawOutput : "";
   const saveOutput = parsedResult?.saveOutput ?? null;
+  const completionMarkerMissing = parsedResult?.completionMarkerMissing ?? false;
   let saveBlock = "";
   if (saveOutput) {
     saveBlock = `${saveOutput.message}\n\n`;
   }
+  // Warn when a file was written but the completion marker is absent — indicates
+  // the incremental-write review overflowed before finishing. The file contains
+  // partial content; the stall-reroute hook should re-run the review.
+  const markerWarning = completionMarkerMissing
+    ? "[PLUGIN-INCOMPLETE] Review file written but <!-- REVIEW COMPLETE --> marker is missing. The review overflowed before finishing — treat the output file as partial. Stall-reroute should re-run.\n\n"
+    : "";
   const diagnosticPrefix =
     diagnostics.length > 0 ? `[PLUGIN-DIAGNOSTICS]\n- ${diagnostics.join("\n- ")}\n\n` : "";
   if (rawOutput) {
     const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
-    return `${diagnosticPrefix}${saveBlock}${expectedBlock}${output}`;
+    return `${diagnosticPrefix}${markerWarning}${saveBlock}${expectedBlock}${output}`;
   }
 
   const message = String(parsedResult?.failureMessage ?? "").trim() || "Codex did not return a final message.";
-  return `${diagnosticPrefix}${saveBlock}${expectedBlock}${message}\n`;
+  return `${diagnosticPrefix}${markerWarning}${saveBlock}${expectedBlock}${message}\n`;
 }
 
 export function renderStatusReport(report) {

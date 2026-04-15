@@ -72,6 +72,7 @@ const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "hi
 const REASONING_EFFORT_ALIASES = new Map([["minimal", "low"]]);
 const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
+const REVIEW_COMPLETE_MARKER = "<!-- REVIEW COMPLETE -->";
 
 // LOCAL PATCH (2026-04-08): rescue-hygiene prepend to prevent the heredoc write-trap
 // pattern observed in the PM#674 test-agent incident. When POAgent spawns codex-rescue
@@ -269,6 +270,19 @@ function maybePersistTaskOutput({ allowWrite = false, rawOutput = "", savePath =
   if (!savePath || !rawOutput || !allowWrite) return null;
   if (savePathAlreadyTouched) return null;
   return persistTaskOutput(savePath, rawOutput);
+}
+
+// Returns true if the file at filePath ends with the REVIEW_COMPLETE_MARKER.
+// Returns false if the file is missing, unreadable, or the marker is absent.
+// Used to distinguish a partial incremental-write file from a fully completed one.
+function checkCompletionMarker(filePath) {
+  if (!filePath) return false;
+  try {
+    const content = fs.readFileSync(filePath, "utf8");
+    return content.includes(REVIEW_COMPLETE_MARKER);
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -795,6 +809,17 @@ async function executeTaskRun(request) {
   }
   const normalizedTouchedFiles = [...new Set(touchedFiles)];
 
+  // Completion marker check: for incremental-write spec reviews, Codex writes each
+  // section to disk as it goes and appends <!-- REVIEW COMPLETE --> as the final act.
+  // If the file was written (by Codex or by the companion) but the marker is absent,
+  // the review overflowed mid-write — the file is partial. Surface this in the payload
+  // so POAgent / codex-stall-reroute can detect incomplete reviews without reading the
+  // review content themselves.
+  const resolvedSavePath = saveOutput?.path ?? (savePathAlreadyTouched ? requestedSavePath : null);
+  const completionMarkerMissing = resolvedSavePath
+    ? !checkCompletionMarker(resolvedSavePath)
+    : false;
+
   // Ground-truth verification: Codex self-reports are unreliable. If the caller
   // declared expected deliverable paths, the filesystem is authoritative.
   // If the companion write succeeded, treat the save path as present for exit
@@ -812,6 +837,7 @@ async function executeTaskRun(request) {
       rawOutput,
       failureMessage,
       saveOutput,
+      completionMarkerMissing,
       reasoningSummary: result.reasoningSummary
     },
     {
@@ -833,6 +859,7 @@ async function executeTaskRun(request) {
     rawOutput,
     touchedFiles: normalizedTouchedFiles,
     saveOutput,
+    completionMarkerMissing,
     reasoningSummary: result.reasoningSummary,
     sandboxMode: request.write ? "workspace-write" : "read-only",
     commandFailures: result.commandFailures ?? [],
