@@ -205,11 +205,20 @@ function normalizeRequestedSavePath(candidate) {
   return path.resolve(candidate);
 }
 
+// Cap refinement iterations to bound worst-case cost. Each iteration does up to 3
+// syscalls (fs.existsSync + fs.statSync + fs.existsSync on parent). A well-formed
+// prompt finds its file extension on iteration 1 via extractFileLikeSavePath. A
+// pathological prompt with many space-separated tokens would otherwise exhaust I/O
+// proportional to token count. 20 iterations is plenty for any realistic path.
+const REFINE_PATH_MAX_ITERATIONS = 20;
+
 function refineRequestedSavePath(candidate) {
   const rawCandidate = trimSavePathCandidate(candidate);
   if (!rawCandidate) return null;
   let current = rawCandidate;
-  while (current) {
+  let iterations = 0;
+  while (current && iterations < REFINE_PATH_MAX_ITERATIONS) {
+    iterations += 1;
     const trimmed = trimSavePathCandidate(current);
     if (trimmed) {
       const fileLike = extractFileLikeSavePath(trimmed);
@@ -890,9 +899,13 @@ async function executeTaskRun(request) {
     (request.incrementalWrite && Array.isArray(request.expectFiles) && request.expectFiles.length > 0
       ? request.expectFiles[0]
       : null);
+  // For incrementalWrite tasks, a null resolvedSavePath means no file was written at all
+  // (apply_patch failed, permissions, disk full, or the model refused). Treat this as
+  // completionMarkerMissing=true so POAgent sees [PLUGIN-INCOMPLETE] and can reroute
+  // rather than silently succeeding with no output.
   const completionMarkerMissing = resolvedSavePath
     ? !checkCompletionMarker(resolvedSavePath)
-    : false;
+    : Boolean(request.incrementalWrite);
 
   // Ground-truth verification: Codex self-reports are unreliable. If the caller
   // declared expected deliverable paths, the filesystem is authoritative.

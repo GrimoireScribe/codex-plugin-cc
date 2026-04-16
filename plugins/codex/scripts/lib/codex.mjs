@@ -52,8 +52,35 @@ const TASK_THREAD_PREFIX = "Codex Companion Task";
 const DEFAULT_CONTINUE_PROMPT =
   "Continue from the current thread state. Pick the next highest-value step and follow through until the task is resolved.";
 
+// Track live temp files so we can clean them up on abnormal exit. The per-run
+// finally-block cleanup handles the normal path; this set + process.on("exit")
+// handler catches leaks when an uncaught exception or signal kills the process
+// before the promise chain settles.
+const LIVE_TEMP_FILES = new Set();
+let EXIT_CLEANUP_REGISTERED = false;
+
+function registerExitCleanup() {
+  if (EXIT_CLEANUP_REGISTERED) return;
+  EXIT_CLEANUP_REGISTERED = true;
+  process.on("exit", () => {
+    for (const filePath of LIVE_TEMP_FILES) {
+      try {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      } catch { /* best effort */ }
+    }
+    LIVE_TEMP_FILES.clear();
+  });
+}
+
 function buildExecTempPath(kind) {
-  return path.join(os.tmpdir(), `codex-companion-${kind}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
+  registerExitCleanup();
+  const p = path.join(os.tmpdir(), `codex-companion-${kind}-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
+  LIVE_TEMP_FILES.add(p);
+  return p;
+}
+
+function releaseTempPath(filePath) {
+  if (filePath) LIVE_TEMP_FILES.delete(filePath);
 }
 
 function pushExecConfig(args, key, value) {
@@ -1568,9 +1595,11 @@ export async function runCodexExecTask(cwd, options = {}) {
     if (fs.existsSync(outputPath)) {
       fs.unlinkSync(outputPath);
     }
+    releaseTempPath(outputPath);
     if (schemaPath && fs.existsSync(schemaPath)) {
       fs.unlinkSync(schemaPath);
     }
+    releaseTempPath(schemaPath);
   }
 
   return {

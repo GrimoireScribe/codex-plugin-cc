@@ -67,6 +67,25 @@ test("extractRequestedSavePath character class [\\/] matches both separators in 
   assert.equal(re.test("E:/path"), true, "must match forward slash");
 });
 
+test("extractRequestedSavePath handles pathological multi-token input in bounded time", () => {
+  // Guards against DoS risk flagged in 2026-04-15 adversarial review: a prompt with
+  // many space-separated tokens after a "save to" directive would previously cause
+  // refineRequestedSavePath to iterate O(tokens) times with filesystem syscalls each.
+  // The iteration cap in codex-companion.mjs should bound worst-case cost.
+  const tokens = Array.from({ length: 500 }, (_, i) => `/tmp/t${i}`).join(" ");
+  const prompt = `save to ${tokens} /tmp/final.md`;
+  const start = Date.now();
+  const result = extractPath(prompt);
+  const elapsed = Date.now() - start;
+  // Even with 500 tokens, the regex itself should terminate quickly. The refinement
+  // step (which does fs syscalls) is behind this test and should be bounded by the
+  // REFINE_PATH_MAX_ITERATIONS cap. A conservative threshold — if this test ever
+  // takes >2s, something is wrong.
+  assert.ok(elapsed < 2000, `Extraction took ${elapsed}ms — should be bounded`);
+  // Result is allowed to be anything sensible; we only care that it didn't hang.
+  assert.ok(result !== undefined, "must return a defined result");
+});
+
 test("extractRequestedSavePath works against the real spec-adversarial-review template", () => {
   // Integration-style: read the actual prompt template, simulate interpolation the
   // same way prompts.mjs does, and verify the save-path extraction against it.
