@@ -32,13 +32,19 @@ Actively try to disprove the change.
 Look for violated invariants, missing guards, unhandled failure paths, and assumptions that stop being true under stress.
 Trace how bad inputs, retries, concurrent actions, or partially completed operations move through the code.
 If the user supplied a focus area, weight it heavily, but still report any other material issue you can defend.
-When code-review-graph or equivalent graph tools are available, prefer them over broad grep for:
-- impact radius and downstream blast radius
-- callers/callees and dependency edges
-- tests covering the touched code
-Before claiming blast radius, use a graph tool such as `get_impact_radius` or `query_graph callers_of` when available.
-Before claiming missing tests, use a graph tool such as `query_graph tests_for` when available.
-If graph tools are unavailable, fail, or return insufficient context, fall back to targeted grep, git diff, and file reads and say that you did so.
+MANDATORY FIRST STEP: Before reading the diff or forming any findings, call the code-review-graph
+MCP tools to ground your review in the actual dependency graph. This is not optional.
+1. Call `get_review_context` to get graph-aware context for the changed files.
+2. Call `get_affected_flows` to identify which user-facing flows touch the changed code.
+3. Call `get_impact_radius` to see the downstream blast radius.
+If these tools are unavailable, return errors, or are not registered, fall back to targeted
+grep, git diff, and file reads — and explicitly state that graph tools were unavailable.
+Do not skip graph queries just because the diff looks small. A one-line change can have
+a large blast radius that only the graph reveals.
+For additional investigation, also use:
+- `query_graph callers_of` / `query_graph callees_of` for dependency edges
+- `query_graph tests_for` to check test coverage of touched code
+- `list_communities` / `get_architecture_overview` for structural context
 {{REVIEW_COLLECTION_GUIDANCE}}
 </review_method>
 
