@@ -1340,6 +1340,7 @@ export async function runCodexExecTask(cwd, options = {}) {
   const mcpToolCalls = [];
   const dynamicToolCalls = [];
   let finalMessage = "";
+  let accumulatedMessages = "";
   let lastMessage = "";
   let threadId = null;
   let turnId = null;
@@ -1467,16 +1468,17 @@ export async function runCodexExecTask(cwd, options = {}) {
           const item = event.item ?? {};
           const itemType = normalizeExecItemType(item.type);
           if (itemType === "agent_message" && typeof item.text === "string") {
-            // Accumulate all agent messages so the companion has the full session
-            // output, not just the last turn's commentary. This is critical for
-            // companion-layer persistence: when Codex exhausts context before
-            // writing a file, the review content is in an earlier agent_message
-            // and would be lost if we only kept the final one.
-            // lastMessage tracks only the most recent agent_message — used by the
-            // review path which expects the final JSON blob, not an accumulated string.
+            // finalMessage holds only the most recent agent_message — the final
+            // output we want to surface. Previously this accumulated every inter-tool
+            // narration chunk, which bloated transcripts with running commentary.
+            // accumulatedMessages retains the full history as a fallback for when
+            // Codex is killed before flushing --output-last-message (e.g., the
+            // finalization timer fires mid-write). Only used if both the output file
+            // and finalMessage end up empty.
             lastMessage = item.text;
-            finalMessage = finalMessage
-              ? `${finalMessage}\n\n${item.text}`
+            finalMessage = item.text;
+            accumulatedMessages = accumulatedMessages
+              ? `${accumulatedMessages}\n\n${item.text}`
               : item.text;
             emitProgress(options.onProgress, "Assistant produced a final message.", "finalizing");
             scheduleFinalizationTimer();
@@ -1578,18 +1580,22 @@ export async function runCodexExecTask(cwd, options = {}) {
   try {
     if (fs.existsSync(outputPath)) {
       const fileContent = fs.readFileSync(outputPath, "utf8");
-      // Only overwrite the in-memory accumulated messages if the file actually has
-      // content. Codex can leave a zero-byte --output-last-message file when it crashes
-      // or is killed mid-stream (e.g., SIGTERM from finalization timer before the CLI
+      // Only overwrite the in-memory messages if the file actually has content.
+      // Codex can leave a zero-byte --output-last-message file when it crashes or
+      // is killed mid-stream (e.g., SIGTERM from finalization timer before the CLI
       // flushes). Clobbering finalMessage/lastMessage with "" would destroy any real
       // content captured from the event stream.
       if (fileContent.length > 0) {
         finalMessage = fileContent;
-        // Sync lastMessage from the authoritative file. The file is written by the
-        // Codex CLI and is more reliable than the stdout-event-sourced in-memory
-        // accumulation — prefer it for the review path's JSON parse.
         lastMessage = fileContent;
       }
+    }
+    // Fallback: if neither the output file nor the event-sourced final message
+    // captured anything, fall back to the accumulated narration so the caller has
+    // something to work with. This preserves the pre-existing recovery behavior
+    // for cases like context-exhaustion mid-turn.
+    if (!finalMessage && accumulatedMessages) {
+      finalMessage = accumulatedMessages;
     }
   } finally {
     if (fs.existsSync(outputPath)) {
