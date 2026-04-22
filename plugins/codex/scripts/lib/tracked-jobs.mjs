@@ -186,7 +186,11 @@ export async function runTrackedJob(job, runner, options = {}) {
       pid: null,
       completedAt
     });
-    appendLogBlock(options.logFile ?? job.logFile ?? null, "Final output", execution.rendered);
+    // Skip the "Final output" log-append — the rendered content is already
+    // persisted in the job file (execution.rendered) and was streamed to the
+    // log as individual "Assistant message" blocks during execution. Writing
+    // it again here caused every recommendation to appear twice in progress
+    // previews and status output.
     return execution;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

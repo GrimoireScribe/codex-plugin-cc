@@ -210,6 +210,8 @@ function cleanCodexStderr(stderr) {
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
     .filter((line) => line && !line.startsWith("WARNING: proceeding, even though we could not update PATH:"))
+    .filter((line) => !/CreateProcess(?:WithLogonW?|W)\b/.test(line))
+    .filter((line) => !/sandbox.*(?:denied|failed|blocked)|(?:denied|failed|blocked).*sandbox/i.test(line))
     .join("\n");
 }
 
