@@ -1164,7 +1164,7 @@ async function handleReviewCommand(argv, config) {
     jobClass: "review",
     summary: metadata.summary
   });
-  await runForegroundCommand(
+  const execution = await runForegroundCommand(
     job,
     (progress) =>
       executeReviewRun({
@@ -1179,6 +1179,15 @@ async function handleReviewCommand(argv, config) {
       }),
     { json: options.json }
   );
+
+  if (options.output) {
+    const outputPath = path.resolve(options.output);
+    const content = options.json
+      ? JSON.stringify(execution.payload, null, 2)
+      : execution.rendered;
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, content, "utf8");
+  }
 }
 
 async function handleReview(argv) {
