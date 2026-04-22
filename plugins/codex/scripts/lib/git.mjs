@@ -134,6 +134,17 @@ export function getWorkingTreeState(cwd) {
 export function resolveReviewTarget(cwd, options = {}) {
   ensureGitRepository(cwd);
 
+  const commitRef = options.commit ?? null;
+  if (commitRef) {
+    gitChecked(cwd, ["rev-parse", "--verify", commitRef]);
+    return {
+      mode: "commit",
+      label: `commit ${commitRef}`,
+      commitRef,
+      explicit: true
+    };
+  }
+
   const requestedScope = options.scope ?? "auto";
   const baseRef = options.base ?? null;
   const state = getWorkingTreeState(cwd);
@@ -158,7 +169,7 @@ export function resolveReviewTarget(cwd, options = {}) {
 
   if (!supportedScopes.has(requestedScope)) {
     throw new Error(
-      `Unsupported review scope "${requestedScope}". Use one of: auto, working-tree, branch, or pass --base <ref>.`
+      `Unsupported review scope "${requestedScope}". Use one of: auto, working-tree, branch, or pass --base <ref> / --commit <sha>.`
     );
   }
 
@@ -300,6 +311,38 @@ function collectBranchContext(cwd, baseRef, options = {}) {
   };
 }
 
+function collectCommitContext(cwd, commitRef, options = {}) {
+  const includeDiff = options.includeDiff !== false;
+  const diffRange = `${commitRef}^..${commitRef}`;
+  const changedFiles = gitChecked(cwd, ["diff", "--name-only", diffRange]).stdout.trim().split("\n").filter(Boolean);
+  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", "-1", commitRef]).stdout.trim();
+  const commitMessage = gitChecked(cwd, ["log", "--format=%B", "-1", commitRef]).stdout.trim();
+  const diffStat = gitChecked(cwd, ["diff", "--stat", diffRange]).stdout.trim();
+
+  return {
+    mode: "commit",
+    summary: `Reviewing commit ${commitRef}.`,
+    content: includeDiff
+      ? [
+          formatSection("Commit", logOutput),
+          formatSection("Commit Message", commitMessage),
+          formatSection("Diff Stat", diffStat),
+          formatSection(
+            "Commit Diff",
+            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", diffRange]).stdout
+          )
+        ].join("\n")
+      : [
+          formatSection("Commit", logOutput),
+          formatSection("Commit Message", commitMessage),
+          formatSection("Diff Stat", diffStat),
+          formatSection("Changed Files", changedFiles.join("\n"))
+        ].join("\n"),
+    changedFiles,
+    commitRef
+  };
+}
+
 function buildAdversarialCollectionGuidance(options = {}) {
   if (options.includeDiff !== false) {
     return "Use the repository context below as primary evidence.";
@@ -317,7 +360,17 @@ export function collectReviewContext(cwd, target, options = {}) {
   let includeDiff;
   let diffBytes;
 
-  if (target.mode === "working-tree") {
+  if (target.mode === "commit") {
+    const diffRange = `${target.commitRef}^..${target.commitRef}`;
+    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", diffRange]).stdout.trim().split("\n").filter(Boolean).length;
+    diffBytes = measureGitOutputBytes(
+      repoRoot,
+      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", diffRange],
+      maxInlineDiffBytes
+    );
+    includeDiff = options.includeDiff ?? (fileCount <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
+    details = collectCommitContext(repoRoot, target.commitRef, { includeDiff });
+  } else if (target.mode === "working-tree") {
     const state = getWorkingTreeState(repoRoot);
     diffBytes = measureCombinedGitOutputBytes(
       repoRoot,

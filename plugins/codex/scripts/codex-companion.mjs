@@ -678,7 +678,8 @@ async function executeReviewRun(request) {
 
   const target = resolveReviewTarget(request.cwd, {
     base: request.base,
-    scope: request.scope
+    scope: request.scope,
+    commit: request.commit
   });
   const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
@@ -1137,7 +1138,7 @@ function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd"],
+    valueOptions: ["base", "scope", "model", "cwd", "commit", "output"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -1149,7 +1150,8 @@ async function handleReviewCommand(argv, config) {
   const focusText = positionals.join(" ").trim();
   const target = resolveReviewTarget(cwd, {
     base: options.base,
-    scope: options.scope
+    scope: options.scope,
+    commit: options.commit
   });
 
   config.validateRequest?.(target, focusText);
@@ -1169,6 +1171,7 @@ async function handleReviewCommand(argv, config) {
         cwd,
         base: options.base,
         scope: options.scope,
+        commit: options.commit,
         model: options.model,
         focusText,
         reviewName: config.reviewName,
