@@ -1182,9 +1182,19 @@ async function handleReviewCommand(argv, config) {
 
   if (options.output) {
     const outputPath = path.resolve(options.output);
-    const content = options.json
+    let content = options.json
       ? JSON.stringify(execution.payload, null, 2)
       : execution.rendered;
+    // Append the completion marker so downstream tooling (e.g. POAgent's
+    // judge gate) can distinguish a complete review from a partial file
+    // using the same marker contract that spec/scoping reviews already emit.
+    // The code-review path returns a single rendered blob (not incremental
+    // apply_patch sections), so the marker is appended here in Node rather
+    // than written by Codex itself. Skipped on --json (the marker would
+    // invalidate the JSON envelope) and on non-zero exit (review failed).
+    if (!options.json && execution.exitStatus === 0 && !content.trimEnd().endsWith(REVIEW_COMPLETE_MARKER)) {
+      content = `${content.trimEnd()}\n\n${REVIEW_COMPLETE_MARKER}\n`;
+    }
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });
     fs.writeFileSync(outputPath, content, "utf8");
   }
