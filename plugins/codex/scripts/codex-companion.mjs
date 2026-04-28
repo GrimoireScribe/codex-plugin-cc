@@ -1172,7 +1172,7 @@ async function handleReviewCommand(argv, config) {
         base: options.base,
         scope: options.scope,
         commit: options.commit,
-        model: options.model,
+        model: normalizeRequestedModel(options.model),
         focusText,
         reviewName: config.reviewName,
         onProgress: progress
