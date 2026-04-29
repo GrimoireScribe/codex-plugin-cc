@@ -1404,8 +1404,7 @@ export async function runCodexExecTask(cwd, options = {}) {
   if (options.effort) {
     pushExecConfig(args, "model_reasoning_effort", options.effort);
   }
-  args.push("--dangerously-bypass-approvals-and-sandbox",
-    "--ignore-user-config", "--ignore-rules");
+  args.push("--dangerously-bypass-approvals-and-sandbox", "--ignore-rules");
   if (options.resumeThreadId) {
     args.push("resume", options.resumeThreadId);
   }
