@@ -83,6 +83,7 @@ Every finding must cite a specific section or passage of the scoping plan at {{S
 Do not invent architectural decisions, child tickets, or dependencies not described in the plan.
 If a conclusion depends on an inference, state that explicitly and keep the confidence honest.
 This is framing review only — do NOT review code.
+Do not use image generation, vision, or drawing tools. This is a text-only review.
 </grounding_rules>
 
 <calibration_rules>

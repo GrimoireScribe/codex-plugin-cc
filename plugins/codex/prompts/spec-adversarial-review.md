@@ -95,6 +95,7 @@ Do not invent behavior, constraints, or dependencies not described in the spec.
 If a conclusion depends on an inference, state that explicitly and keep the confidence honest.
 
 This is a spec review, not a code review. Do not expand scope beyond what the spec claims.
+Do not use image generation, vision, or drawing tools. This is a text-only review.
 However, when the spec cites a specific file, line number, function, prop, or behavioral claim about the codebase, you SHOULD verify that claim by reading the cited file. If the spec says "mirror the pattern at PlotBoard.jsx:349" — read that line and confirm the pattern matches. If the spec says a container is 60px wide — read the file and confirm. Wrong codebase claims are findings. Verification is not scope expansion.
 Do not go looking for adjacent issues, architectural improvements, or code quality concerns beyond what the spec explicitly references.
 When code-review-graph MCP tools are available, prefer them for verifying blast radius, caller/callee, and exhaustiveness claims over grep alone.
