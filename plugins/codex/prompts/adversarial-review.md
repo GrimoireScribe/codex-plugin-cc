@@ -55,7 +55,8 @@ A finding should answer:
 1. What can go wrong?
 2. Why is this code path vulnerable?
 3. What is the likely impact?
-4. What concrete change would reduce the risk?
+4. What triggers it? Is this an ordinary single-user action (e.g., "export CSV with a comma"), or does it require multiple simultaneous conditions (e.g., "navigate scenes while AI streams while clearHistory fires")? State the trigger conditions explicitly.
+5. What concrete change would reduce the risk?
 </finding_bar>
 
 <structured_output_contract>
@@ -67,7 +68,10 @@ Every finding must include:
 - the affected file
 - `line_start` and `line_end`
 - a confidence score from 0 to 1
-- a concrete recommendation
+- a **corrective invariant** (what must become true for this finding to be resolved)
+- a **proposed fix** (one specific code change that satisfies the invariant, detailed enough for an implementer to act on directly, not just "fix this" but "move the capture to a native focusin listener installed before React mounts")
+- **fix confidence** (high/medium/low; if low, state assumptions or escalation target)
+- **trigger conditions** (what user action or system state triggers this bug? "ordinary" if any single normal user action triggers it; describe the specific multi-step or timing conditions if it requires concurrent actions or narrow async windows)
 Write the summary like a terse ship/no-ship assessment, not a neutral recap.
 </structured_output_contract>
 
