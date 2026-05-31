@@ -552,12 +552,63 @@ async function handleSetup(argv) {
   outputResult(options.json ? finalReport : renderSetupReport(finalReport), options.json);
 }
 
-function buildAdversarialReviewPrompt(context, focusText) {
+// Fast-tier reviewers (gpt-5.4-mini, gpt-5.3-codex-spark) are smaller models that
+// over-explore: less confident about code they haven't read, they compensate by
+// reading everything. On a tiny diff that means repo-wide grep sweeps + full-file
+// reads that balloon context past 1M tokens until each turn exceeds the 300s idle
+// timeout (silent timeout) or the child is killed mid-turn (exit 0 + empty output).
+// Deep tier can self-scope and reason about a diff without reading its surroundings,
+// so it keeps the full exploratory method. Fast tier gets pre-scoped: review only
+// the provided context, do not go hunting through the repo. See diagnosis 2026-05-31.
+const FAST_TIER_REVIEW_MODELS = new Set(["gpt-5.4-mini", "gpt-5.3-codex-spark"]);
+
+function isFastTierReviewModel(model) {
+  if (!model) {
+    return false;
+  }
+  return FAST_TIER_REVIEW_MODELS.has(String(model).trim().toLowerCase());
+}
+
+// Deep tier: graph-first exploration is mandatory and repo-wide investigation is
+// encouraged. The model is large enough to absorb the resulting context and converge.
+const DEEP_TIER_EXPLORATION = `MANDATORY FIRST STEP: Before reading the diff or forming any findings, call the code-review-graph
+MCP tools to ground your review in the actual dependency graph. This is not optional.
+1. Call \`get_review_context\` to get graph-aware context for the changed files.
+2. Call \`get_affected_flows\` to identify which user-facing flows touch the changed code.
+3. Call \`get_impact_radius\` to see the downstream blast radius.
+If these tools are unavailable, return errors, or are not registered, fall back to targeted
+grep, git diff, and file reads — and explicitly state that graph tools were unavailable.
+Do not skip graph queries just because the diff looks small. A one-line change can have
+a large blast radius that only the graph reveals.
+For additional investigation, also use:
+- \`query_graph callers_of\` / \`query_graph callees_of\` for dependency edges
+- \`query_graph tests_for\` to check test coverage of touched code
+- \`list_communities\` / \`get_architecture_overview\` for structural context`;
+
+// Fast tier: bounded review surface. The diff and changed-file context are already
+// inlined below — review THOSE. No repo-wide exploration, no mandatory graph sweep.
+// This stops the small model from self-inflicting a context explosion on tiny diffs.
+const FAST_TIER_EXPLORATION = `SCOPE: Review ONLY the repository context provided below — the diff and the changed
+files are already included. Do NOT explore the wider repository: no repo-wide \`grep\`/\`rg\`
+sweeps, no reading of files that are not part of the change, no walking the dependency
+graph. The provided context is your complete review surface; base every finding on it.
+If you genuinely cannot assess a finding without a specific unseen file, say so in the
+finding body and lower your confidence rather than going to read it.
+The code-review-graph MCP tools are OPTIONAL here: you may make at most one targeted
+\`get_review_context\` call for the changed files if it directly sharpens a finding, but
+skip it entirely if the diff is self-contained. Do not chain graph queries.`;
+
+function buildAdversarialReviewPrompt(context, focusText, options = {}) {
   const template = loadPromptTemplate(ROOT_DIR, "adversarial-review");
+  // Only pre-scope when the diff is actually inlined (inputMode "inline-diff"); if the
+  // context was too large to inline (self-collect), the model must inspect it itself, so
+  // the bounded "do not explore" instruction would leave it with nothing to review.
+  const fastBounded = options.fastTier === true && context.inputMode === "inline-diff";
   return interpolateTemplate(template, {
     REVIEW_KIND: "Adversarial Review",
     TARGET_LABEL: context.target.label,
     USER_FOCUS: focusText || "No extra focus provided.",
+    REVIEW_METHOD_EXPLORATION: fastBounded ? FAST_TIER_EXPLORATION : DEEP_TIER_EXPLORATION,
     REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
     REVIEW_INPUT: context.content
   });
@@ -683,11 +734,12 @@ async function executeReviewRun(request) {
   });
   const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
+  const fastTier = isFastTierReviewModel(request.model);
   let context = collectReviewContext(request.cwd, target);
   let prompt =
     reviewName === "Review" || reviewName === "MCP Review"
       ? buildMcpReviewPrompt(context, focusText)
-      : buildAdversarialReviewPrompt(context, focusText);
+      : buildAdversarialReviewPrompt(context, focusText, { fastTier });
 
   if (prompt.length > MAX_CODEX_EXEC_PROMPT_CHARS && context.inputMode !== "self-collect") {
     request.onProgress?.(
@@ -700,7 +752,7 @@ async function executeReviewRun(request) {
     prompt =
       reviewName === "Review" || reviewName === "MCP Review"
         ? buildMcpReviewPrompt(context, focusText)
-        : buildAdversarialReviewPrompt(context, focusText);
+        : buildAdversarialReviewPrompt(context, focusText, { fastTier });
   }
   const result = await runCodexExecTask(context.repoRoot, {
     prompt,
