@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { parseExpectFiles, decideTaskExit } from "./lib/expect-files.mjs";
@@ -614,11 +614,18 @@ function buildAdversarialReviewPrompt(context, focusText, options = {}) {
   });
 }
 
-function buildMcpReviewPrompt(context, focusText) {
+function buildMcpReviewPrompt(context, focusText, options = {}) {
   const template = loadPromptTemplate(ROOT_DIR, "review-mcp");
+  // Same fast-tier pre-scoping as the adversarial path: only bound exploration when
+  // the diff is actually inlined (inline-diff). On self-collect there is nothing
+  // inlined to review, so the model must keep the exploratory method. See the
+  // gpt-5.4-mini code-review timeout diagnosis 2026-06-04 (same cause as 93f0396,
+  // which only covered the adversarial path).
+  const fastBounded = options.fastTier === true && context.inputMode === "inline-diff";
   return interpolateTemplate(template, {
     TARGET_LABEL: context.target.label,
     USER_FOCUS: focusText || "No extra focus provided.",
+    REVIEW_METHOD_EXPLORATION: fastBounded ? FAST_TIER_EXPLORATION : DEEP_TIER_EXPLORATION,
     REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
     REVIEW_INPUT: context.content
   });
@@ -738,7 +745,7 @@ async function executeReviewRun(request) {
   let context = collectReviewContext(request.cwd, target);
   let prompt =
     reviewName === "Review" || reviewName === "MCP Review"
-      ? buildMcpReviewPrompt(context, focusText)
+      ? buildMcpReviewPrompt(context, focusText, { fastTier })
       : buildAdversarialReviewPrompt(context, focusText, { fastTier });
 
   if (prompt.length > MAX_CODEX_EXEC_PROMPT_CHARS && context.inputMode !== "self-collect") {
@@ -751,7 +758,7 @@ async function executeReviewRun(request) {
     });
     prompt =
       reviewName === "Review" || reviewName === "MCP Review"
-        ? buildMcpReviewPrompt(context, focusText)
+        ? buildMcpReviewPrompt(context, focusText, { fastTier })
         : buildAdversarialReviewPrompt(context, focusText, { fastTier });
   }
   const result = await runCodexExecTask(context.repoRoot, {
@@ -1676,8 +1683,28 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${message}\n`);
-  process.exitCode = 1;
-});
+// Only run the CLI when invoked directly. When imported by tests (to unit-test the
+// prompt builders), skip main() so importing does not try to parse process.argv.
+const isDirectInvocation = (() => {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+  return import.meta.url === pathToFileURL(entry).href;
+})();
+
+if (isDirectInvocation) {
+  main().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+  });
+}
+
+export {
+  buildMcpReviewPrompt,
+  buildAdversarialReviewPrompt,
+  isFastTierReviewModel,
+  FAST_TIER_EXPLORATION,
+  DEEP_TIER_EXPLORATION
+};

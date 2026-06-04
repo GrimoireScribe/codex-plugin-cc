@@ -14,13 +14,7 @@ Prioritize correctness, regressions, and operational risk over style or cleanup.
 Look for violated invariants, missing guards, unhandled failure paths, and assumptions that stop being true under stress.
 Trace how bad inputs, retries, concurrent actions, or partially completed operations move through the code.
 If the user supplied a focus area, weight it heavily, but still report any other material issue you can defend.
-When code-review-graph or equivalent graph tools are available, prefer them over broad grep for:
-- impact radius and downstream blast radius
-- callers/callees and dependency edges
-- tests covering the touched code
-Before claiming blast radius, use a graph tool such as `get_impact_radius` or `query_graph callers_of` when available.
-Before claiming missing tests, use a graph tool such as `query_graph tests_for` when available.
-If graph tools are unavailable, fail, or return insufficient context, fall back to targeted grep, git diff, and file reads and say that you did so.
+{{REVIEW_METHOD_EXPLORATION}}
 {{REVIEW_COLLECTION_GUIDANCE}}
 </review_method>
 
