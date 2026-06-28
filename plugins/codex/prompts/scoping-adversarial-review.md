@@ -86,6 +86,8 @@ This is framing review only — do NOT review code.
 Do not use image generation, vision, or drawing tools. This is a text-only review.
 </grounding_rules>
 
+{{FAST_TIER_SCOPE}}
+
 <calibration_rules>
 Prefer one strong finding per section over several weak ones.
 Do not dilute serious framing issues with minor observations.

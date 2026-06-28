@@ -569,6 +569,55 @@ function isFastTierReviewModel(model) {
   return FAST_TIER_REVIEW_MODELS.has(String(model).trim().toLowerCase());
 }
 
+// Fast-tier spec/scoping reviews must not run at xhigh. xhigh reasoning on the mini/spark
+// tier drives a reasoning + file-read explosion: one ACT-WARNING spec review on
+// gpt-5.4-mini at xhigh churned 3.18M cumulative input tokens across 40 file reads over
+// ~12 minutes (diagnosis 2026-06-28) before completing — far past the 300s idle budget, so
+// the orchestrator saw a hung/failed review. Cap fast tier at "high": full deliberation
+// without the runaway. `null` (no explicit --effort) is forced to "high" too, so a future
+// xhigh config default cannot silently re-introduce the blowup. Lower explicit efforts
+// (low/medium) are respected as-is.
+function capFastTierReviewEffort(model, effort) {
+  if (!isFastTierReviewModel(model)) {
+    return effort;
+  }
+  if (effort == null || effort === "xhigh") {
+    return "high";
+  }
+  return effort;
+}
+
+// Fast-tier spec review gets a hard verification budget. The spec-review prompt invites the
+// reviewer to verify cited codebase claims by reading the cited files; the small model
+// reads EVERYTHING and explodes its own context. This bounds it to the few load-bearing
+// cited claims. Injected only for fast tier — deep tier keeps the full exploratory method.
+const FAST_TIER_SPEC_SCOPE = `<fast_tier_scope>
+You are running on a fast-tier model that tends to over-explore and blow up its own context.
+Hold a hard exploration budget for the entire review:
+- The spec text is your primary source. Read the spec ONCE; do not re-read it.
+- You may verify codebase claims ONLY when the spec explicitly cites a concrete location
+  (a named file, file:line, function, prop, or numeric value). Verify at most the FEW most
+  load-bearing such claims, and never open more than 5 files total for the whole review.
+- One read per file. Never re-read a file you have already opened.
+- NO repo-wide grep/rg/Select-String sweeps, NO directory walking, NO reading files the
+  spec does not explicitly name. If a claim is not cited with a concrete location, treat it
+  as out of scope: lower the finding's confidence instead of hunting through the repo.
+- When in doubt, stop reading and write the finding. The spec — not the codebase — is your
+  review surface.
+</fast_tier_scope>`;
+
+// Fast-tier scoping review: a scoping-plan review never reads code, but the small model
+// still over-reads adjacent docs/tickets. Bound it to the plan itself.
+const FAST_TIER_SCOPING_SCOPE = `<fast_tier_scope>
+You are running on a fast-tier model that tends to over-explore. Hold a hard budget:
+- The scoping plan is your only source. Read it ONCE; do not re-read it.
+- Do NOT read the codebase. Do NOT go reading adjacent specs, parent docs, or tickets
+  beyond the plan unless the plan explicitly names a document you must open to judge its
+  framing — and then at most 3 files total, one read each.
+- NO repo-wide grep/rg/Select-String sweeps, NO directory walking.
+- When in doubt, stop reading and write the finding.
+</fast_tier_scope>`;
+
 // Deep tier: graph-first exploration is mandatory and repo-wide investigation is
 // encouraged. The model is large enough to absorb the resulting context and converge.
 const DEEP_TIER_EXPLORATION = `MANDATORY FIRST STEP: Before reading the diff or forming any findings, call the code-review-graph
@@ -1355,12 +1404,17 @@ async function handleSpecAdversarialReview(argv) {
   const outputPath = path.resolve(options.output);
   const specSlug = path.basename(specPath, path.extname(specPath));
 
+  const model = normalizeRequestedModel(options.model);
+  const effort = capFastTierReviewEffort(model, normalizeReasoningEffort(options.effort));
+  const fastTier = isFastTierReviewModel(model);
+
   const template = loadPromptTemplate(ROOT_DIR, "spec-adversarial-review");
   const prompt = interpolateTemplate(template, {
     SPEC_PATH: specPath,
     OUTPUT_PATH: outputPath,
     TARGET_LABEL: `spec: ${specSlug}`,
-    USER_FOCUS: "Adversarial spec review — find ambiguities, contradictions, missing edge cases, unjustified architectural premises."
+    USER_FOCUS: "Adversarial spec review — find ambiguities, contradictions, missing edge cases, unjustified architectural premises.",
+    FAST_TIER_SCOPE: fastTier ? FAST_TIER_SPEC_SCOPE : ""
   });
 
   const cwd = resolveCommandCwd(options);
@@ -1380,8 +1434,8 @@ async function handleSpecAdversarialReview(argv) {
       executeTaskRun({
         cwd,
         prompt,
-        model: normalizeRequestedModel(options.model),
-        effort: normalizeReasoningEffort(options.effort),
+        model,
+        effort,
         write: true,
         // incrementalWrite: the model writes sections one-by-one via apply_patch.
         // This flag: (1) extends the finalization timer to 60s so gpt-5.4 has time to
@@ -1413,12 +1467,17 @@ async function handleScopingAdversarialReview(argv) {
   const outputPath = path.resolve(options.output);
   const scopingSlug = path.basename(specPath, path.extname(specPath));
 
+  const model = normalizeRequestedModel(options.model);
+  const effort = capFastTierReviewEffort(model, normalizeReasoningEffort(options.effort));
+  const fastTier = isFastTierReviewModel(model);
+
   const template = loadPromptTemplate(ROOT_DIR, "scoping-adversarial-review");
   const prompt = interpolateTemplate(template, {
     SPEC_PATH: specPath,
     OUTPUT_PATH: outputPath,
     TARGET_LABEL: `scoping plan: ${scopingSlug}`,
-    USER_FOCUS: "Framing review — challenge the shape of the phase, not individual ticket phrasing. Is the phase scoped around the right problem? Are load-bearing architectural decisions justified? Is the child decomposition and ordering correct?"
+    USER_FOCUS: "Framing review — challenge the shape of the phase, not individual ticket phrasing. Is the phase scoped around the right problem? Are load-bearing architectural decisions justified? Is the child decomposition and ordering correct?",
+    FAST_TIER_SCOPE: fastTier ? FAST_TIER_SCOPING_SCOPE : ""
   });
 
   const cwd = resolveCommandCwd(options);
@@ -1438,8 +1497,8 @@ async function handleScopingAdversarialReview(argv) {
       executeTaskRun({
         cwd,
         prompt,
-        model: normalizeRequestedModel(options.model),
-        effort: normalizeReasoningEffort(options.effort),
+        model,
+        effort,
         write: true,
         incrementalWrite: true,
         expectFiles: [outputPath],
@@ -1705,6 +1764,7 @@ export {
   buildMcpReviewPrompt,
   buildAdversarialReviewPrompt,
   isFastTierReviewModel,
+  capFastTierReviewEffort,
   FAST_TIER_EXPLORATION,
   DEEP_TIER_EXPLORATION
 };

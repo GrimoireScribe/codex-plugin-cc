@@ -101,6 +101,8 @@ Do not go looking for adjacent issues, architectural improvements, or code quali
 When code-review-graph MCP tools are available, prefer them for verifying blast radius, caller/callee, and exhaustiveness claims over grep alone.
 </grounding_rules>
 
+{{FAST_TIER_SCOPE}}
+
 <calibration_rules>
 Prefer zero findings over weak findings.
 A good spec that is implementable should PASS. Most specs are implementable.
