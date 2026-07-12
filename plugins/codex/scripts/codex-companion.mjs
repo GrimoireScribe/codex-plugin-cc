@@ -70,7 +70,15 @@ const TASK_IDLE_TIMEOUT_MS = readPositiveEnvInt("CODEX_TASK_IDLE_TIMEOUT_MS", 30
 const MAX_CODEX_EXEC_PROMPT_CHARS = readPositiveEnvInt("CODEX_MAX_PROMPT_CHARS", 900000);
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const REASONING_EFFORT_ALIASES = new Map([["minimal", "low"]]);
-const MODEL_ALIASES = new Map([["spark", "gpt-5.3-codex-spark"]]);
+const MODEL_ALIASES = new Map([
+  ["spark", "gpt-5.3-codex-spark"],
+  // GPT-5.6 tiered family (Opus/Sonnet/Haiku-analogous): sol = flagship, terra = mini,
+  // luna = nano. Shorthands so `--model terra` resolves to the full id before the
+  // fast-tier check below sees it.
+  ["sol", "gpt-5.6-sol"],
+  ["terra", "gpt-5.6-terra"],
+  ["luna", "gpt-5.6-luna"]
+]);
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 const REVIEW_COMPLETE_MARKER = "<!-- REVIEW COMPLETE -->";
 
@@ -552,15 +560,22 @@ async function handleSetup(argv) {
   outputResult(options.json ? finalReport : renderSetupReport(finalReport), options.json);
 }
 
-// Fast-tier reviewers (gpt-5.4-mini, gpt-5.3-codex-spark) are smaller models that
-// over-explore: less confident about code they haven't read, they compensate by
-// reading everything. On a tiny diff that means repo-wide grep sweeps + full-file
-// reads that balloon context past 1M tokens until each turn exceeds the 300s idle
-// timeout (silent timeout) or the child is killed mid-turn (exit 0 + empty output).
-// Deep tier can self-scope and reason about a diff without reading its surroundings,
-// so it keeps the full exploratory method. Fast tier gets pre-scoped: review only
-// the provided context, do not go hunting through the repo. See diagnosis 2026-05-31.
-const FAST_TIER_REVIEW_MODELS = new Set(["gpt-5.4-mini", "gpt-5.3-codex-spark"]);
+// Fast-tier reviewers (gpt-5.4-mini, gpt-5.3-codex-spark, and the GPT-5.6 small tiers
+// gpt-5.6-terra/gpt-5.6-luna) are smaller models that over-explore: less confident about
+// code they haven't read, they compensate by reading everything. On a tiny diff that means
+// repo-wide grep sweeps + full-file reads that balloon context past 1M tokens until each
+// turn exceeds the 300s idle timeout (silent timeout) or the child is killed mid-turn
+// (exit 0 + empty output). Deep tier can self-scope and reason about a diff without reading
+// its surroundings, so it keeps the full exploratory method. Fast tier gets pre-scoped:
+// review only the provided context, do not go hunting through the repo. terra (the 5.6 mini
+// variant) and luna (nano) are capped pre-emptively — same class as gpt-5.4-mini, so we
+// don't wait for a repeat blowup to confirm it. See diagnosis 2026-05-31.
+const FAST_TIER_REVIEW_MODELS = new Set([
+  "gpt-5.4-mini",
+  "gpt-5.3-codex-spark",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna"
+]);
 
 function isFastTierReviewModel(model) {
   if (!model) {
