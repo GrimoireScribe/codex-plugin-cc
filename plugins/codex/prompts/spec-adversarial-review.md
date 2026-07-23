@@ -72,7 +72,34 @@ Label each PM-M1, PM-L1, etc.
 Same structure. If none: write "No medium or low findings."
 Write this to {{OUTPUT_PATH}} NOW before proceeding to Section 5.
 
-Step 6 — Write Section 5: Verdict
+Step 6 — Write Section 5: Review Evidence
+This section is REQUIRED whether or not you logged findings, and it must be written BEFORE the verdict.
+Write the heading "## Review Evidence" followed by a fenced ```json block containing exactly this object shape:
+
+```json
+{
+  "scope": "provided-artifact-only",
+  "files_examined": ["<the spec path, plus any file you actually opened to verify a codebase claim>"],
+  "checks_performed": [
+    {
+      "check": "<what you verified>",
+      "evidence": ["<a specific observed fact, e.g. 'spec §4 line 88 states 60px; PlotBoard.jsx:349 sets width: 60'>"]
+    }
+  ],
+  "tools_used": [],
+  "limitations": []
+}
+```
+
+Rules for this object:
+- `scope` is `provided-artifact-only` for a spec review. Use `targeted-repository` only if you genuinely read repository files beyond the spec to verify its codebase claims.
+- `files_examined` must include the spec path at {{SPEC_PATH}} and is never empty.
+- `checks_performed` must contain at least one entry, and each `evidence` item must be a specific observed fact. A tool name is NOT evidence. "Read the spec", "reviewed it", and "looks implementable" are NOT evidence.
+- `tools_used: []` is valid and correct when you called no tools.
+- `limitations: []` is valid when there were none.
+Write this to {{OUTPUT_PATH}} NOW before proceeding to Section 6.
+
+Step 7 — Write Section 6: Verdict
 One line: `verdict: pass | findings-logged | fail`
 Criteria:
 - fail = any Critical finding present
@@ -80,7 +107,7 @@ Criteria:
 - pass = Medium/Low only, or no findings at all
 Write this to {{OUTPUT_PATH}} NOW.
 
-Step 7 — Write the completion marker
+Step 8 — Write the completion marker
 As your absolute final act, append this exact line to {{OUTPUT_PATH}}:
 <!-- REVIEW COMPLETE -->
 
@@ -90,6 +117,7 @@ written before context overflow. Do not omit it. Do not write it before the Verd
 
 <grounding_rules>
 Stay grounded.
+Every MATERIAL claim you make carries an evidentiary burden — that includes findings, their severity, factual statements about the spec or the code, AND any claim that the spec is correct / implementable / complete / ready, or any pass verdict. Record your actual scope, files examined, checks performed, tools used, and limitations in the Review Evidence section. A clearance (pass / no findings) requires at least one concrete recorded check plus a specific observed fact supporting it. The phrases "reviewed", "verified against HEAD", and "looks implementable" are NOT evidence. No-findings is a conclusion that still requires complete Review Evidence; it is not an appearance test. Concision is subordinate to evidentiary completeness. Do not fabricate scope, checks, or tool usage.
 Every finding must cite a specific section or line of the spec at {{SPEC_PATH}}.
 Do not invent behavior, constraints, or dependencies not described in the spec.
 If a conclusion depends on an inference, state that explicitly and keep the confidence honest.
@@ -107,7 +135,7 @@ When code-review-graph MCP tools are available, prefer them for verifying blast 
 Prefer zero findings over weak findings.
 A good spec that is implementable should PASS. Most specs are implementable.
 Do not manufacture findings to justify your existence as a reviewer.
-If the spec is clear, unambiguous, and an implementer would build the right thing, return pass with no findings.
+Return pass with no findings only when the recorded checks support that clearance; a pass still requires a complete Review Evidence section.
 
 The derivability test: before writing any finding, ask "would two competent implementers, reading this spec independently, build different user-visible behavior on this point?" If no, it is not a finding at any severity.
 
@@ -123,6 +151,7 @@ Before writing the completion marker, verify:
 - Each finding is tied to a specific spec section
 - Each finding is actionable for an engineer fixing the spec
 - The verdict matches the highest severity finding present
-- All five sections are on disk at {{OUTPUT_PATH}}
+- The "## Review Evidence" section is on disk, is valid JSON, names {{SPEC_PATH}} in `files_examined`, and every `checks_performed` entry carries at least one specific observed fact rather than a restatement of the task or a bare tool name
+- All six sections are on disk at {{OUTPUT_PATH}}
 Then write <!-- REVIEW COMPLETE -->.
 </final_check>

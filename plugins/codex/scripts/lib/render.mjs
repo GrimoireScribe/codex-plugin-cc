@@ -21,6 +21,58 @@ function formatLineRange(finding) {
   return `:${finding.line_start}-${finding.line_end}`;
 }
 
+// Graph MCP tools whose presence in `tools_used` witnesses a graph-grounded review.
+// Matched as substrings so `mcp__code-review-graph__get_impact_radius` counts.
+const GRAPH_TOOL_MARKERS = [
+  "get_review_context",
+  "get_affected_flows",
+  "get_impact_radius",
+  "query_graph",
+  "list_communities",
+  "get_architecture_overview"
+];
+
+// Scopes that assert the reviewer went beyond the provided artifact. These are the
+// scopes the deep tier's mandatory graph-first step is supposed to produce.
+const WIDER_SCOPES = new Set(["targeted-repository", "repository-wide"]);
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && Boolean(value.trim());
+}
+
+function validateReviewEvidenceShape(evidence) {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    return "Missing object `review_evidence`.";
+  }
+  if (!isNonEmptyString(evidence.scope)) {
+    return "Missing string `review_evidence.scope`.";
+  }
+  if (!Array.isArray(evidence.files_examined) || evidence.files_examined.length === 0) {
+    return "Missing non-empty array `review_evidence.files_examined`.";
+  }
+  if (!Array.isArray(evidence.checks_performed) || evidence.checks_performed.length === 0) {
+    return "Missing non-empty array `review_evidence.checks_performed`.";
+  }
+  for (const [index, entry] of evidence.checks_performed.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return `\`review_evidence.checks_performed[${index}]\` is not an object.`;
+    }
+    if (!isNonEmptyString(entry.check)) {
+      return `Missing string \`review_evidence.checks_performed[${index}].check\`.`;
+    }
+    if (!Array.isArray(entry.evidence) || !entry.evidence.some((item) => isNonEmptyString(item))) {
+      return `Missing non-empty array \`review_evidence.checks_performed[${index}].evidence\`.`;
+    }
+  }
+  if (!Array.isArray(evidence.tools_used)) {
+    return "Missing array `review_evidence.tools_used`.";
+  }
+  if (!Array.isArray(evidence.limitations)) {
+    return "Missing array `review_evidence.limitations`.";
+  }
+  return null;
+}
+
 function validateReviewResultShape(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     return "Expected a top-level JSON object.";
@@ -37,7 +89,39 @@ function validateReviewResultShape(data) {
   if (!Array.isArray(data.next_steps)) {
     return "Missing array `next_steps`.";
   }
-  return null;
+  return validateReviewEvidenceShape(data.review_evidence);
+}
+
+// A wider-than-artifact scope claim is the deep tier's graph-grounded claim. Treat it as
+// unwitnessed unless `tools_used` names a graph tool or `limitations` documents the
+// failure/fallback. A self-report is disclosure, not proof — this only flags the gap.
+export function auditGraphWitness(evidence) {
+  const warnings = [];
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    return warnings;
+  }
+  const scope = isNonEmptyString(evidence.scope) ? evidence.scope.trim() : "";
+  if (!WIDER_SCOPES.has(scope)) {
+    return warnings;
+  }
+  const tools = Array.isArray(evidence.tools_used) ? evidence.tools_used : [];
+  const hasGraphCall = tools.some(
+    (tool) => isNonEmptyString(tool) && GRAPH_TOOL_MARKERS.some((marker) => tool.includes(marker))
+  );
+  if (hasGraphCall) {
+    return warnings;
+  }
+  const limitations = Array.isArray(evidence.limitations) ? evidence.limitations : [];
+  const documentsFallback = limitations.some(
+    (item) => isNonEmptyString(item) && /graph/i.test(item)
+  );
+  if (documentsFallback) {
+    return warnings;
+  }
+  warnings.push(
+    `Scope claims \`${scope}\` but \`tools_used\` names no graph tool and \`limitations\` documents no graph failure or fallback. Treat the wider-scope claim as unwitnessed.`
+  );
+  return warnings;
 }
 
 function normalizeReviewFinding(finding, index) {
@@ -55,7 +139,25 @@ function normalizeReviewFinding(finding, index) {
     file: typeof source.file === "string" && source.file.trim() ? source.file.trim() : "unknown",
     line_start: lineStart,
     line_end: lineEnd,
-    recommendation: typeof source.recommendation === "string" ? source.recommendation.trim() : ""
+    confidence: typeof source.confidence === "number" && Number.isFinite(source.confidence) ? source.confidence : null,
+    severity_rationale: isNonEmptyString(source.severity_rationale) ? source.severity_rationale.trim() : "",
+    corrective_invariant: isNonEmptyString(source.corrective_invariant) ? source.corrective_invariant.trim() : "",
+    recommendation: typeof source.recommendation === "string" ? source.recommendation.trim() : "",
+    fix_confidence: isNonEmptyString(source.fix_confidence) ? source.fix_confidence.trim() : "",
+    trigger_conditions: isNonEmptyString(source.trigger_conditions) ? source.trigger_conditions.trim() : ""
+  };
+}
+
+function normalizeReviewEvidence(evidence) {
+  return {
+    scope: evidence.scope.trim(),
+    files_examined: evidence.files_examined.filter((item) => isNonEmptyString(item)).map((item) => item.trim()),
+    checks_performed: evidence.checks_performed.map((entry) => ({
+      check: entry.check.trim(),
+      evidence: entry.evidence.filter((item) => isNonEmptyString(item)).map((item) => item.trim())
+    })),
+    tools_used: evidence.tools_used.filter((item) => isNonEmptyString(item)).map((item) => item.trim()),
+    limitations: evidence.limitations.filter((item) => isNonEmptyString(item)).map((item) => item.trim())
   };
 }
 
@@ -63,6 +165,7 @@ function normalizeReviewResultData(data) {
   return {
     verdict: data.verdict.trim(),
     summary: data.summary.trim(),
+    review_evidence: normalizeReviewEvidence(data.review_evidence),
     findings: data.findings.map((finding, index) => normalizeReviewFinding(finding, index)),
     next_steps: data.next_steps
       .filter((step) => typeof step === "string" && step.trim())
@@ -163,6 +266,41 @@ function pushJobDetails(lines, job, options = {}) {
   }
 }
 
+// Member 4 of the review-evidence contract: the evidence must reach the review DOCUMENT,
+// not just the JSON. A judge reads the rendered Markdown, so a clearance's scope, checks,
+// and limitations have to be visible here or the contract is lost at the last hop.
+function appendReviewEvidenceSection(lines, evidence) {
+  lines.push("## Review Evidence", "");
+  lines.push(`- Scope: ${evidence.scope}`);
+  lines.push(`- Files examined (${evidence.files_examined.length}):`);
+  for (const file of evidence.files_examined) {
+    lines.push(`  - ${file}`);
+  }
+  lines.push("- Checks performed:");
+  for (const entry of evidence.checks_performed) {
+    lines.push(`  - ${entry.check}`);
+    for (const item of entry.evidence) {
+      lines.push(`    - Evidence: ${item}`);
+    }
+  }
+  lines.push(`- Tools used: ${evidence.tools_used.length > 0 ? evidence.tools_used.join(", ") : "none"}`);
+  if (evidence.limitations.length > 0) {
+    lines.push("- Limitations:");
+    for (const limitation of evidence.limitations) {
+      lines.push(`  - ${limitation}`);
+    }
+  } else {
+    lines.push("- Limitations: none recorded");
+  }
+
+  const warnings = auditGraphWitness(evidence);
+  for (const warning of warnings) {
+    lines.push(`- [PLUGIN-EVIDENCE-WARNING] ${warning}`);
+  }
+
+  lines.push("");
+}
+
 function appendReasoningSection(lines, reasoningSummary) {
   if (!Array.isArray(reasoningSummary) || reasoningSummary.length === 0) {
     return;
@@ -259,6 +397,8 @@ export function renderReviewResult(parsedResult, meta) {
     ""
   ];
 
+  appendReviewEvidenceSection(lines, data.review_evidence);
+
   if (findings.length === 0) {
     lines.push("No material findings.");
   } else {
@@ -267,8 +407,23 @@ export function renderReviewResult(parsedResult, meta) {
       const lineSuffix = formatLineRange(finding);
       lines.push(`- [${finding.severity}] ${finding.title} (${finding.file}${lineSuffix})`);
       lines.push(`  ${finding.body}`);
+      if (finding.confidence !== null) {
+        lines.push(`  Confidence: ${finding.confidence}`);
+      }
+      if (finding.severity_rationale) {
+        lines.push(`  Severity rationale: ${finding.severity_rationale}`);
+      }
+      if (finding.trigger_conditions) {
+        lines.push(`  Trigger conditions: ${finding.trigger_conditions}`);
+      }
+      if (finding.corrective_invariant) {
+        lines.push(`  Corrective invariant: ${finding.corrective_invariant}`);
+      }
       if (finding.recommendation) {
         lines.push(`  Recommendation: ${finding.recommendation}`);
+      }
+      if (finding.fix_confidence) {
+        lines.push(`  Fix confidence: ${finding.fix_confidence}`);
       }
     }
   }

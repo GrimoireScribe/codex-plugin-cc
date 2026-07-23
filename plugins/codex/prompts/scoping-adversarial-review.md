@@ -61,7 +61,34 @@ Is the proposed execution sequence correct given dependencies? Would any child b
 If ordering looks correct: say so directly.
 Write this to {{OUTPUT_PATH}} NOW under the heading "## Ordering Correctness" before proceeding to Section 5.
 
-Step 6 — Write Section 5: Overall Verdict
+Step 6 — Write Section 5: Review Evidence
+This section is REQUIRED whether or not you logged findings, and it must be written BEFORE the verdict.
+Write the heading "## Review Evidence" followed by a fenced ```json block containing exactly this object shape:
+
+```json
+{
+  "scope": "provided-artifact-only",
+  "files_examined": ["<the scoping plan path, plus any file you actually opened>"],
+  "checks_performed": [
+    {
+      "check": "<what you verified>",
+      "evidence": ["<a specific observed fact, e.g. 'plan §3 lists child PM-4 as depending on PM-2, but the ordering table places PM-4 first'>"]
+    }
+  ],
+  "tools_used": [],
+  "limitations": []
+}
+```
+
+Rules for this object:
+- `scope` is `provided-artifact-only` for a scoping review. Use `targeted-repository` only if you genuinely read repository files beyond the plan.
+- `files_examined` must include the scoping plan path at {{SPEC_PATH}} and is never empty.
+- `checks_performed` must contain at least one entry, and each `evidence` item must be a specific observed fact. A tool name is NOT evidence. "Read the plan", "reviewed it", and "framing looks correct" are NOT evidence.
+- `tools_used: []` is valid and correct when you called no tools.
+- `limitations: []` is valid when there were none.
+Write this to {{OUTPUT_PATH}} NOW under the heading "## Review Evidence" before proceeding to Section 6.
+
+Step 7 — Write Section 6: Overall Verdict
 One paragraph synthesis of the strongest concern across all four sections. Then one line:
 `verdict: pass | findings-logged | fail`
 Criteria:
@@ -70,7 +97,7 @@ Criteria:
 - pass = no material concerns — the phase is scoped correctly
 Write this to {{OUTPUT_PATH}} NOW under the heading "## Overall Verdict".
 
-Step 7 — Write the completion marker
+Step 8 — Write the completion marker
 As your absolute final act, append this exact line to {{OUTPUT_PATH}}:
 <!-- REVIEW COMPLETE -->
 
@@ -79,6 +106,7 @@ This marker is how automated tooling distinguishes a complete review from a part
 
 <grounding_rules>
 Be aggressive, but stay grounded.
+Every MATERIAL claim you make carries an evidentiary burden — that includes findings, their severity, factual statements about the plan, AND any claim that the phase framing is correct / coherent / complete / ready, or any pass verdict. Record your actual scope, files examined, checks performed, tools used, and limitations in the Review Evidence section. A clearance (pass / no material concerns) requires at least one concrete recorded check plus a specific observed fact supporting it. The phrases "reviewed", "verified against HEAD", and "framing looks correct" are NOT evidence. No-findings is a conclusion that still requires complete Review Evidence; it is not an appearance test. Concision is subordinate to evidentiary completeness. Do not fabricate scope, checks, or tool usage.
 Every finding must cite a specific section or passage of the scoping plan at {{SPEC_PATH}}.
 Do not invent architectural decisions, child tickets, or dependencies not described in the plan.
 If a conclusion depends on an inference, state that explicitly and keep the confidence honest.
@@ -91,14 +119,15 @@ Do not use image generation, vision, or drawing tools. This is a text-only revie
 <calibration_rules>
 Prefer one strong finding per section over several weak ones.
 Do not dilute serious framing issues with minor observations.
-If the phase framing looks correct, say so directly in each section and return a pass verdict.
+Return a pass verdict only when the recorded checks support that clearance; a pass still requires a complete Review Evidence section.
 </calibration_rules>
 
 <final_check>
 Before writing the completion marker, verify:
-- Each section uses the exact heading specified (Framing Assessment, Unjustified Load-Bearing Architectural Decisions, Child Decomposition Correctness, Ordering Correctness, Overall Verdict)
+- Each section uses the exact heading specified (Framing Assessment, Unjustified Load-Bearing Architectural Decisions, Child Decomposition Correctness, Ordering Correctness, Review Evidence, Overall Verdict)
 - Each finding is tied to a specific passage in the scoping plan
 - The verdict matches the highest severity finding across all sections
-- All five sections are on disk at {{OUTPUT_PATH}}
+- The "## Review Evidence" section is on disk, is valid JSON, names {{SPEC_PATH}} in `files_examined`, and every `checks_performed` entry carries at least one specific observed fact rather than a restatement of the task or a bare tool name
+- All six sections are on disk at {{OUTPUT_PATH}}
 Then write <!-- REVIEW COMPLETE -->.
 </final_check>
