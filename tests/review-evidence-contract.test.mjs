@@ -202,3 +202,82 @@ test("per-finding contract fields are required by the schema", () => {
     );
   }
 });
+
+// --- Guard: the live-API gap that v5.3.5 shipped through ---
+//
+// The original contract used `uniqueItems: true`, which the OpenAI structured-output API
+// rejects with HTTP 400 invalid_json_schema — every schema-backed review died at the wire.
+// The local fixtures never caught it because they only checked schema/JSON validity and
+// never did a response_format round-trip. This test encodes the API's strict-mode keyword
+// restrictions so the next unsupported keyword is caught here instead of in production.
+//
+// The permitted set below is empirically confirmed against a live `codex exec
+// --output-schema` call: minItems / minLength / minimum / maximum round-trip cleanly;
+// uniqueItems does not.
+test("output schema uses no keyword the OpenAI structured-output API rejects", () => {
+  const REJECTED = [
+    "uniqueItems",
+    "patternProperties",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "propertyNames",
+    "minProperties",
+    "maxProperties",
+    "contains",
+    "minContains",
+    "maxContains",
+    "dependentSchemas",
+    "dependentRequired",
+    "if",
+    "then",
+    "else",
+    "not",
+    "oneOf"
+  ];
+
+  const offenders = [];
+  const walk = (node, pointer) => {
+    if (Array.isArray(node)) {
+      node.forEach((child, index) => walk(child, `${pointer}/${index}`));
+      return;
+    }
+    if (!node || typeof node !== "object") {
+      return;
+    }
+    for (const key of Object.keys(node)) {
+      if (REJECTED.includes(key)) {
+        offenders.push(`${pointer}/${key}`);
+      }
+      walk(node[key], `${pointer}/${key}`);
+    }
+  };
+  walk(SCHEMA, "#");
+
+  assert.deepEqual(offenders, [], `schema uses API-rejected keyword(s): ${offenders.join(", ")}`);
+});
+
+// Uniqueness moved out of the wire schema, so the renderer now owns it. A duplicate must
+// not inflate the examined-file count, and the collapse must be disclosed rather than
+// silently swallowed — but it must not kill the review either.
+test("renderer collapses duplicate evidence entries and discloses the collapse", () => {
+  const padded = {
+    ...DIFF_ONLY_CLEARANCE,
+    review_evidence: {
+      ...DIFF_ONLY_CLEARANCE.review_evidence,
+      files_examined: ["src/lib/scenes.js", "src/lib/scenes.js", " src/lib/scenes.js ", "src/lib/other.js"],
+      tools_used: ["grep", "grep"]
+    }
+  };
+
+  // Still schema-valid: the API no longer enforces uniqueness, so the renderer must cope.
+  assert.ok(isValid(SCHEMA, padded), "padded evidence must remain schema-valid");
+
+  const doc = renderReviewResult({ parsed: padded, rawOutput: "", parseError: null }, META);
+
+  assert.match(doc, /## Review Evidence/, "render must produce the evidence section, not a validation error");
+  assert.match(doc, /Files examined \(2\)/, "duplicate paths must not inflate the count");
+  assert.match(doc, /\[PLUGIN-EVIDENCE-WARNING\][^\n]*Duplicate evidence entries were collapsed/);
+  assert.match(doc, /files_examined: src\/lib\/scenes\.js/);
+  assert.match(doc, /tools_used: grep/);
+  assert.equal((doc.match(/- Tools used: grep\b/g) ?? []).length, 1, "tools_used must render deduped");
+});

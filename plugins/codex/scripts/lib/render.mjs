@@ -40,6 +40,39 @@ function isNonEmptyString(value) {
   return typeof value === "string" && Boolean(value.trim());
 }
 
+// Trim, drop empties, and collapse exact duplicates, reporting what was collapsed.
+//
+// `files_examined` and `tools_used` used to carry `uniqueItems: true`, but the OpenAI
+// structured-output API rejects that keyword outright (HTTP 400 invalid_json_schema),
+// which killed every schema-backed review. Uniqueness is a semantic constraint, so it
+// belongs here rather than in the wire schema.
+//
+// Duplicates are collapsed and disclosed, not treated as a hard error: a repeated path
+// is a padding tell worth surfacing, but failing the whole render over one would turn a
+// cosmetic model slip into a dead review — the exact failure mode this fix exists to
+// remove. Collapsing keeps the rendered counts honest; the warning keeps the padding
+// visible. Matching JSON Schema's `uniqueItems`, equality is exact (post-trim).
+function dedupeEvidenceStrings(values) {
+  const seen = new Set();
+  const unique = [];
+  const duplicates = [];
+  for (const value of values) {
+    if (!isNonEmptyString(value)) {
+      continue;
+    }
+    const trimmed = value.trim();
+    if (seen.has(trimmed)) {
+      if (!duplicates.includes(trimmed)) {
+        duplicates.push(trimmed);
+      }
+      continue;
+    }
+    seen.add(trimmed);
+    unique.push(trimmed);
+  }
+  return { unique, duplicates };
+}
+
 function validateReviewEvidenceShape(evidence) {
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
     return "Missing object `review_evidence`.";
@@ -149,15 +182,28 @@ function normalizeReviewFinding(finding, index) {
 }
 
 function normalizeReviewEvidence(evidence) {
+  const files = dedupeEvidenceStrings(evidence.files_examined);
+  const tools = dedupeEvidenceStrings(evidence.tools_used);
+  const duplicatesCollapsed = [];
+  if (files.duplicates.length > 0) {
+    duplicatesCollapsed.push(`files_examined: ${files.duplicates.join(", ")}`);
+  }
+  if (tools.duplicates.length > 0) {
+    duplicatesCollapsed.push(`tools_used: ${tools.duplicates.join(", ")}`);
+  }
+
   return {
     scope: evidence.scope.trim(),
-    files_examined: evidence.files_examined.filter((item) => isNonEmptyString(item)).map((item) => item.trim()),
+    files_examined: files.unique,
     checks_performed: evidence.checks_performed.map((entry) => ({
       check: entry.check.trim(),
       evidence: entry.evidence.filter((item) => isNonEmptyString(item)).map((item) => item.trim())
     })),
-    tools_used: evidence.tools_used.filter((item) => isNonEmptyString(item)).map((item) => item.trim()),
-    limitations: evidence.limitations.filter((item) => isNonEmptyString(item)).map((item) => item.trim())
+    tools_used: tools.unique,
+    limitations: evidence.limitations.filter((item) => isNonEmptyString(item)).map((item) => item.trim()),
+    // Carries what dedupeEvidenceStrings removed so the render layer can disclose it.
+    // The raw arrays are gone by render time, so the collapse has to be recorded here.
+    duplicates_collapsed: duplicatesCollapsed
   };
 }
 
@@ -294,6 +340,9 @@ function appendReviewEvidenceSection(lines, evidence) {
   }
 
   const warnings = auditGraphWitness(evidence);
+  for (const collapsed of evidence.duplicates_collapsed ?? []) {
+    warnings.push(`Duplicate evidence entries were collapsed (${collapsed}). Counts above reflect distinct entries only.`);
+  }
   for (const warning of warnings) {
     lines.push(`- [PLUGIN-EVIDENCE-WARNING] ${warning}`);
   }
