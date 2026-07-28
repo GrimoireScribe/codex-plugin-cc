@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Hardened Codex plugin fork for Claude Code with Grimoire-specific runtime fixes.",
-    "version": "1.0.3-grimoire.10"
+    "version": "1.0.3-grimoire.11"
   },
   "plugins": [
     {
       "name": "codex",
       "description": "Use Codex from Claude Code to review code or delegate tasks with the hardened Grimoire fork.",
-      "version": "1.0.3-grimoire.10",
+      "version": "1.0.3-grimoire.11",
       "author": {
         "name": "Grimoire",
         "url": "https://github.com/GrimoireScribe"

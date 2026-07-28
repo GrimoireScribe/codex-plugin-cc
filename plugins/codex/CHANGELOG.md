@@ -5,6 +5,10 @@
 - Make `/codex:review` the default MCP-capable self-collected standard review path.
 - Remove the separate `/codex:review:mcp` and `/codex:review-mcp` command surfaces.
 
+## 1.0.3-grimoire.11
+
+- Port upstream v1.0.6 shell hardening: `git.mjs` now forces `shell: false` on every git invocation so repository-derived arguments (branch names, refs) can never pass through a shell, with an upstream regression test covering special-character default branch names.
+
 ## 1.0.3-grimoire.10
 
 - Move `/codex:review`, `/codex:adversarial-review`, and rescue/task execution onto direct `codex exec` so MCP-capable flows no longer depend on the older app-server review path.
