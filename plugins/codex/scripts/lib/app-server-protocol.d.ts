@@ -45,6 +45,30 @@ export type {
 export type ThreadStartParams = Omit<RawThreadStartParams, "persistExtendedHistory">;
 export type ThreadResumeParams = Omit<RawThreadResumeParams, "persistExtendedHistory">;
 
+// The generated app-server types in this fork predate externalAgentConfig/import,
+// so the migration payload is declared locally to match the Codex wire format.
+export interface ExternalAgentSessionMigrationItem {
+  itemType: string;
+  description: string;
+  cwd: string | null;
+  details: {
+    plugins: unknown[];
+    sessions: Array<{ path: string; cwd: string; title: string | null }>;
+    mcpServers: unknown[];
+    hooks: unknown[];
+    subagents: unknown[];
+    commands: unknown[];
+  };
+}
+
+export interface ExternalAgentConfigImportParams {
+  migrationItems: ExternalAgentSessionMigrationItem[];
+}
+
+export interface ExternalAgentConfigImportResponse {
+  importId: string;
+}
+
 export interface CodexAppServerClientOptions {
   env?: NodeJS.ProcessEnv;
   clientInfo?: ClientInfo;
@@ -56,6 +80,7 @@ export interface CodexAppServerClientOptions {
 
 export interface AppServerMethodMap {
   initialize: { params: InitializeParams; result: InitializeResponse };
+  "externalAgentConfig/import": { params: ExternalAgentConfigImportParams; result: ExternalAgentConfigImportResponse };
   "thread/start": { params: ThreadStartParams; result: ThreadStartResponse };
   "thread/resume": { params: ThreadResumeParams; result: ThreadResumeResponse };
   "thread/name/set": { params: ThreadSetNameParams; result: ThreadSetNameResponse };

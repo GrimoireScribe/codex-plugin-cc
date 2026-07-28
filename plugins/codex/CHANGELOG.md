@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.3-grimoire.12
+
+- Port upstream v1.0.5 `/codex:transfer`: converts the current Claude Code session into a persistent, resumable Codex thread via the external-agent session importer (`externalAgentConfig/import`), with the `SessionStart` hook now exporting the transcript path and `--source` as a manual override.
+- Declare `requestAttestation: false` in the app-server initialize capabilities and include captured stderr when the spawned app-server exits unexpectedly (upstream parity).
+- Drop the deprecated `experimentalRawEvents` field from thread/start params, matching upstream and Codex CLI 0.145.0.
+
 ## Unreleased
 
 - Make `/codex:review` the default MCP-capable self-collected standard review path.
