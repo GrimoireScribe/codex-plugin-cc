@@ -70,22 +70,60 @@ test("every revision-taking git diff routes through the -- / --no-relative guard
   );
   assert.match(source, /function diffRevisionArgs\(revisions\) \{\s*return \["--no-relative", \.\.\.revisions, "--"\];/);
 
-  // No `git diff` may take a revision without going through the helper. Flag any diff
-  // invocation that references a range/SHA variable but not diffRevisionArgs.
+  // Every `git diff` / `git log` invocation must either go through the helper or end with
+  // an explicit `--`. This is an ALLOWLIST, not a heuristic: gating on revision-looking
+  // variable names would silently stop checking a call site the moment someone renames a
+  // variable, which is exactly when the guarantee needs checking.
+  const ALLOWED_UNTERMINATED = [
+    // Working-tree diffs take no revision at all, so there is nothing to disambiguate.
+    '["diff", "--cached", "--name-only"]',
+    '["diff", "--name-only"]',
+    '["diff", "--shortstat", "--cached"]',
+    '["diff", "--shortstat"]',
+    '["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]',
+    '["diff", "--binary", "--no-ext-diff", "--submodule=diff"]'
+  ];
+
+  // Call sites may also spread a pre-built argument array. That is only safe if the array
+  // itself was built with the guard, so each such name is pinned to its construction
+  // below — renaming one breaks these assertions rather than silently disabling the scan.
+  assert.match(source, /const diffArgs = diffRevisionArgs\(/);
+  assert.match(source, /const logArgs = \[\.\.\.range\.logRevisions, "--"\];/);
+  const PREBUILT_ARG_NAMES = ["...diffArgs", "...logArgs"];
+
   const offenders = [];
-  for (const line of source.split("\n")) {
-    if (!/\["diff"/.test(line)) {
+  const usedAllowances = new Set();
+  for (const rawLine of source.split("\n")) {
+    const line = rawLine.trim();
+    if (!/\["(diff|log)"/.test(line)) {
       continue;
     }
     if (/diffRevisionArgs/.test(line)) {
       continue;
     }
-    // Working-tree diffs legitimately take no revision at all.
-    if (/(commitRange|diffRange|Revisions|Sha|commitRef)/.test(line)) {
-      offenders.push(line.trim());
+    if (PREBUILT_ARG_NAMES.some((name) => line.includes(name))) {
+      continue;
     }
+    const allowance = ALLOWED_UNTERMINATED.find((entry) => line.includes(entry));
+    if (allowance) {
+      usedAllowances.add(allowance);
+      continue;
+    }
+    if (/"--"\]/.test(line)) {
+      continue;
+    }
+    offenders.push(line);
   }
-  assert.deepEqual(offenders, [], "these git diff calls pass a revision without the -- / --no-relative guard");
+  assert.deepEqual(
+    offenders,
+    [],
+    "these git diff/log calls take a revision without the -- / --no-relative guard"
+  );
+
+  // A stale allowlist entry is itself a hole: it would keep silently excusing a call
+  // shape that no longer exists while a real one slips past unnoticed.
+  const stale = ALLOWED_UNTERMINATED.filter((entry) => !usedAllowances.has(entry));
+  assert.deepEqual(stale, [], "these allowlist entries no longer match any call site and must be removed");
 });
 
 test("default branch names with special characters are passed to git literally", () => {
@@ -525,8 +563,118 @@ test("commit range annotates a commit whose changes are undone later in the rang
   // The risky commit's content is genuinely absent from the net diff...
   assert.doesNotMatch(context.content, /BAD_AUTH_BYPASS/);
   // ...so the commit list must say so rather than implying it was reviewed.
-  assert.match(context.content, /no net contribution/);
+  assert.match(context.content, /no file this commit touched appears/);
   assert.match(context.content, /NET effect/);
+});
+
+test("a renamed file does not make the commit that changed it look uncovered", () => {
+  // Rename detection is ON by default and the two sides of the annotation oracle see
+  // different paths: the net diff reports only a rename's DESTINATION, while `git show`
+  // on the earlier commit reports the path as it existed THEN. Without --no-renames on
+  // both probes, the commit that introduced the code is branded "no net contribution"
+  // while its change sits in the diff under the new name — an affirmative false claim
+  // steering the reviewer away from the exact commit that matters.
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "auth.js"), "export const ok = true;\n");
+  run("git", ["add", "auth.js"], { cwd });
+  run("git", ["commit", "-m", "base"], { cwd });
+  fs.writeFileSync(path.join(cwd, "auth.js"), "export const ok = true;\nexport const bypass = 'AUTH_BYPASS';\n");
+  run("git", ["add", "auth.js"], { cwd });
+  run("git", ["commit", "-m", "bypass"], { cwd });
+  const bypass = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+  run("git", ["mv", "auth.js", "authentication.js"], { cwd });
+  run("git", ["commit", "-m", "rename"], { cwd });
+
+  const target = resolveReviewTarget(cwd, { commit: `${bypass}^..HEAD` });
+  const context = collectReviewContext(cwd, target);
+
+  // The bypass really is in the combined diff, under the new name.
+  assert.match(context.content, /AUTH_BYPASS/);
+  // So nothing in this range may be annotated as contributing nothing.
+  assert.doesNotMatch(context.content, /no file this commit touched appears/);
+});
+
+test("the net-effect note discloses that marks were computed", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "a.js"), "export const a = 1;\n");
+  run("git", ["add", "a.js"], { cwd });
+  run("git", ["commit", "-m", "one"], { cwd });
+  fs.writeFileSync(path.join(cwd, "b.js"), "export const b = 2;\n");
+  run("git", ["add", "b.js"], { cwd });
+  run("git", ["commit", "-m", "two"], { cwd });
+  const first = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  const context = collectReviewContext(cwd, resolveReviewTarget(cwd, { commit: `${first}^..HEAD` }));
+
+  // The identifier handed to the reviewer must be a runnable git invocation.
+  assert.match(context.content, /Diffed as `git diff [0-9a-f]+\.\.[0-9a-f]+`/);
+  assert.match(context.content, /compares FILE PATHS only/);
+  assert.doesNotMatch(context.content, /marks were NOT computed/);
+});
+
+test("a merge commit is never annotated on missing evidence", () => {
+  // `git show` prints no file list for a merge, so an empty list is "cannot tell" there
+  // and must not be read as "contributed nothing".
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "base.js"), "export const base = 0;\n");
+  run("git", ["add", "base.js"], { cwd });
+  run("git", ["commit", "-m", "base"], { cwd });
+  const base = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+  run("git", ["checkout", "-b", "side"], { cwd });
+  fs.writeFileSync(path.join(cwd, "side.js"), "export const side = 'SIDE_MARKER';\n");
+  run("git", ["add", "side.js"], { cwd });
+  run("git", ["commit", "-m", "side"], { cwd });
+  run("git", ["checkout", "main"], { cwd });
+  fs.writeFileSync(path.join(cwd, "main2.js"), "export const m = 2;\n");
+  run("git", ["add", "main2.js"], { cwd });
+  run("git", ["commit", "-m", "main2"], { cwd });
+  run("git", ["merge", "--no-ff", "side", "-m", "merged"], { cwd });
+
+  const target = resolveReviewTarget(cwd, { commit: `${base}..HEAD` });
+  const context = collectReviewContext(cwd, target, { maxInlineFiles: 5 });
+
+  assert.match(context.content, /SIDE_MARKER/);
+  assert.doesNotMatch(context.content, /no file this commit touched appears/);
+});
+
+test("a second root in the repository does not silently expand ROOT^..HEAD to everything", () => {
+  // "<X> is a root, so use the empty tree" only holds when X is the ONLY root reachable
+  // from the right endpoint. With a merged-in orphan branch (git subtree, imported repo)
+  // the empty tree expands the range to the entire repository and all of its history.
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "old1.js"), "export const old = 'PREDATES_THE_SHIP';\n");
+  run("git", ["add", "old1.js"], { cwd });
+  run("git", ["commit", "-m", "old1"], { cwd });
+  fs.writeFileSync(path.join(cwd, "old2.js"), "export const old2 = 2;\n");
+  run("git", ["add", "old2.js"], { cwd });
+  run("git", ["commit", "-m", "old2"], { cwd });
+
+  run("git", ["checkout", "--orphan", "imported"], { cwd });
+  run("git", ["rm", "-rf", "."], { cwd });
+  fs.writeFileSync(path.join(cwd, "imported.js"), "export const imported = 1;\n");
+  run("git", ["add", "imported.js"], { cwd });
+  run("git", ["commit", "-m", "secondroot"], { cwd });
+  const secondRoot = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  run("git", ["checkout", "main"], { cwd });
+  run("git", ["merge", "--allow-unrelated-histories", "imported", "-m", "mergeimport"], { cwd });
+  fs.writeFileSync(path.join(cwd, "followup.js"), "export const f = 1;\n");
+  run("git", ["add", "followup.js"], { cwd });
+  run("git", ["commit", "-m", "followup"], { cwd });
+
+  // Must NOT quietly review the whole repository as if the second root were THE root.
+  let target = null;
+  try {
+    target = resolveReviewTarget(cwd, { commit: `${secondRoot}^..HEAD` });
+  } catch {
+    return; // refused outright, which is the safe outcome
+  }
+  const context = collectReviewContext(cwd, target, { maxInlineFiles: 50 });
+  assert.doesNotMatch(context.content, /PREDATES_THE_SHIP/);
 });
 
 test("commit range resolves correctly when invoked from a subdirectory", () => {

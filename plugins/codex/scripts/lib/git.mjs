@@ -204,8 +204,21 @@ function resolveCommitRange(cwd, commitRef) {
     if (candidate.status === 0) {
       const candidateSha = candidate.stdout.trim();
       const { base, isRoot } = resolveCommitDiffBase(cwd, candidateSha, left);
+      // "<X> is a root, so the empty tree is the right base" only holds when X is the
+      // ONLY root reachable from the right endpoint. A repository can have several —
+      // `git subtree add`, a merged-in orphan branch, an imported repo. In that case the
+      // empty tree silently expands the range to the ENTIRE repository and every commit
+      // in it, including history that predates the ship. Baseline failed loudly here;
+      // turning that into a silently over-scoped review is the exact failure class the
+      // rest of this resolver exists to prevent.
       if (isRoot) {
-        rootBaseSha = base;
+        const roots = gitChecked(cwd, ["rev-list", "--max-parents=0", rightSha, "--"])
+          .stdout.trim()
+          .split("\n")
+          .filter(Boolean);
+        if (roots.length === 1 && roots[0] === candidateSha) {
+          rootBaseSha = base;
+        }
       }
     }
   }
@@ -253,7 +266,14 @@ function resolveCommitRange(cwd, commitRef) {
   const isRootRange = Boolean(rootBaseSha);
   const diffRevisions = isRootRange ? [diffBase, rightSha] : [`${diffBase}..${rightSha}`];
   const logRevisions = isRootRange ? [rightSha] : [`${diffBase}..${rightSha}`];
-  const displayRange = `${diffBase.slice(0, 12)}..${rightSha.slice(0, 12)}`;
+  // The reviewer is told to go collect the diff itself on the lightweight path, so this
+  // string has to be a RUNNABLE git invocation. Git special-cases the empty tree only at
+  // its full object id — an abbreviated empty-tree id does not resolve — so a root range
+  // must not be abbreviated, and the two-argument form is used rather than `A..B`.
+  const displayRange = isRootRange
+    ? `${diffBase} ${rightSha.slice(0, 12)}`
+    : `${diffBase.slice(0, 12)}..${rightSha.slice(0, 12)}`;
+  const reviewCommand = `Diffed as \`git diff ${displayRange}\``;
 
   const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffRevisionArgs(diffRevisions)]).stdout.trim();
   if (!changedFiles) {
@@ -270,6 +290,7 @@ function resolveCommitRange(cwd, commitRef) {
     diffRevisions,
     logRevisions,
     displayRange,
+    reviewCommand,
     isRootRange,
     left,
     right,
@@ -573,8 +594,8 @@ function collectCommitContext(cwd, commitRef, options = {}) {
   const commit = options.commit ?? resolveSingleCommit(cwd, commitRef);
   const diffArgs = diffRevisionArgs(commit.diffRevisions);
   const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffArgs]).stdout.trim().split("\n").filter(Boolean);
-  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", "-1", commitRef]).stdout.trim();
-  const commitMessage = gitChecked(cwd, ["log", "--format=%B", "-1", commitRef]).stdout.trim();
+  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", "-1", commitRef, "--"]).stdout.trim();
+  const commitMessage = gitChecked(cwd, ["log", "--format=%B", "-1", commitRef, "--"]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffArgs]).stdout.trim();
 
   return {
@@ -603,15 +624,42 @@ function collectCommitContext(cwd, commitRef, options = {}) {
   };
 }
 
+// One `git show` per commit, and the review can walk this path TWICE — collectReviewContext
+// runs again on the prompt-size fallback — so the measured cost doubles in the worst case
+// (~4s per 60 commits here, so ~13s at this cap, ~26s across both runs). Past this many
+// commits the marks are not computed, and the note says so rather than leaving their
+// absence to be misread as "nothing was undone".
+const MAX_ANNOTATED_RANGE_COMMITS = 100;
+
 // A combined range diff is the NET effect of the range, so a commit whose changes were
 // reverted later inside the same range appears in the log with nothing to show for it in
 // the diff. Silently listing it invites the reviewer to believe it reviewed that commit.
 // Annotate those commits explicitly instead.
-function annotateNetEffect(cwd, logOutput, changedFiles) {
-  if (!logOutput) {
+//
+// Both probes MUST run with --no-renames. Rename detection is on by default and the two
+// sides of this comparison see different paths: the net diff reports only a rename's
+// DESTINATION path, while `git show` on an earlier commit reports the path as it existed
+// THEN. Without --no-renames, "commit X edits auth.js" + "commit Y renames auth.js to
+// authentication.js" makes X's file set disjoint from the net set, and X is branded as
+// contributing nothing while its change sits in the diff under the new name. That is
+// strictly worse than the omission this annotation exists to fix: the original bug left
+// the reviewer neutral, the false positive makes an affirmative claim about the exact
+// commit that matters and steers the reviewer away from it. Renaming a file in the same
+// range that changes it is ordinary work, not a corner case.
+//
+// The oracle's file set is computed here rather than reusing the review's own changed-file
+// list, so the user-visible "Changed Files" section keeps rename detection and only this
+// comparison uses the no-renames view.
+function annotateNetEffect(cwd, logOutput, diffArgs, commitCount) {
+  if (!logOutput || commitCount > MAX_ANNOTATED_RANGE_COMMITS) {
     return logOutput;
   }
-  const netFiles = new Set(changedFiles);
+  const netProbe = git(cwd, ["diff", "--name-only", "--no-renames", ...diffArgs]);
+  if (netProbe.status !== 0) {
+    return logOutput; // cannot compute the oracle; annotate nothing rather than guess
+  }
+  const netFiles = new Set(netProbe.stdout.trim().split("\n").filter(Boolean));
+
   return logOutput
     .split("\n")
     .filter(Boolean)
@@ -620,15 +668,31 @@ function annotateNetEffect(cwd, logOutput, changedFiles) {
       if (!sha) {
         return line;
       }
-      const touched = git(cwd, ["show", "--pretty=format:", "--name-only", sha, "--"]);
+      const touched = git(cwd, ["show", "--pretty=format:", "--name-only", "--no-renames", sha, "--"]);
       if (touched.status !== 0) {
         return line;
       }
       const files = touched.stdout.trim().split("\n").filter(Boolean);
-      if (!files.length || files.some((file) => netFiles.has(file))) {
+      if (!files.length) {
+        // `git show` prints no file list for a merge commit, so an empty list is "cannot
+        // tell" there and must not be read as "contributed nothing". For an ordinary
+        // commit an empty list really is definitive. Gate on parent count, not on the
+        // empty list alone.
+        let parentCount = 2;
+        try {
+          parentCount = readCommitParents(cwd, sha).length;
+        } catch {
+          return line;
+        }
+        if (parentCount > 1) {
+          return line;
+        }
+      } else if (files.some((file) => netFiles.has(file))) {
         return line;
       }
-      return `${line}  [no net contribution: this commit's changes are undone later within the range]`;
+      // Describes exactly what was checked — file paths — not what was inferred. A note
+      // whose job is to prevent overclaiming must not itself overclaim.
+      return `${line}  [no file this commit touched appears in the combined diff below]`;
     })
     .join("\n");
 }
@@ -641,18 +705,21 @@ function collectCommitRangeContext(cwd, range, options = {}) {
   const logArgs = [...range.logRevisions, "--"];
   const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffArgs]).stdout.trim().split("\n").filter(Boolean);
   const rawLog = gitChecked(cwd, ["log", "--oneline", "--decorate", ...logArgs]).stdout.trim();
-  const logOutput = annotateNetEffect(cwd, rawLog, changedFiles);
+  const commitCount = rawLog ? rawLog.split("\n").filter(Boolean).length : 0;
+  const logOutput = annotateNetEffect(cwd, rawLog, diffArgs, commitCount);
   const commitMessages = gitChecked(cwd, ["log", "--format=%h %B%n---", ...logArgs]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffArgs]).stdout.trim();
-  const commitCount = rawLog ? rawLog.split("\n").filter(Boolean).length : 0;
+  const target = includeDiff ? "the combined diff below" : "the combined diff (not inlined here)";
+  const annotated = commitCount <= MAX_ANNOTATED_RANGE_COMMITS;
   const netEffectNote = [
-    `(Diffed as ${range.displayRange}. The diff below is the NET effect of all ${commitCount} commit(s),`,
-    "not a replay of each one: work introduced and then reverted within this range is",
-    "correctly absent from it. A commit annotated \"no net contribution\" left nothing behind.",
-    "That annotation is FILE-level, so a commit only PARTIALLY undone later is not flagged —",
-    "its file still appears in the diff while some of its hunks do not. Do not treat the",
-    "commit list as proof that every listed commit's changes are visible below; if a commit",
-    "matters to a finding, check it directly with `git show`.)"
+    `(${range.reviewCommand}.`,
+    `That diff is the NET effect of all ${commitCount} commit(s), not a replay of each one:`,
+    "work introduced and then reverted within this range is correctly absent from it.",
+    annotated
+      ? `An annotated commit is one where no file it touched appears in ${target}; that check compares FILE PATHS only, so a commit whose changes were only PARTIALLY undone later is NOT annotated — its file still appears while some of its hunks do not.`
+      : `This range exceeds ${MAX_ANNOTATED_RANGE_COMMITS} commits, so per-commit contribution marks were NOT computed: the absence of a mark here means nothing was checked, not that nothing was undone.`,
+    "Do not treat the commit list as proof that every listed commit's changes are present.",
+    "If a commit matters to a finding, check it directly with `git show <sha>`.)"
   ].join(" ");
 
   return {

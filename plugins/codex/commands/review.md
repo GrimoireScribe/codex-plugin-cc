@@ -22,7 +22,7 @@ Execution mode rules:
   - For working-tree review, start with `git status --short --untracked-files=all`.
   - For working-tree review, also inspect both `git diff --shortstat --cached` and `git diff --shortstat`.
   - For base-branch review, use `git diff --shortstat <base>...HEAD`.
-  - For `--commit <sha>` review, use `git diff --shortstat <sha>^..<sha>`.
+  - For `--commit <sha>` review, use `git show --shortstat --oneline <sha>` (not `<sha>^..<sha>`, which errors on a root commit).
   - For `--commit <A..B>` range review, use `git diff --shortstat A..B`. A range reviews every commit in it as one combined diff, so size it by the whole range.
   - Treat untracked files or directories as reviewable work even when `git diff --shortstat` is empty.
   - Only conclude there is nothing to review when the relevant working-tree status is empty or the explicit branch diff is empty.
