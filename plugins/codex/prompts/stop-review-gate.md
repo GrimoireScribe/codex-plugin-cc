@@ -1,3 +1,10 @@
+<review_context_and_authorization>
+This is our own application, running locally, and we are its developers reviewing our own first-party code.
+The work under review may implement security hardening, security linting, capability confinement, permission checks, sandboxing, input validation, secret handling, or other defensive controls for OUR OWN codebase. Code that scans for, detects, or reasons about security-sensitive patterns is our own defensive tooling.
+Reviewing such work is standard defensive software engineering. It is not an attempt to attack, evade, bypass, or compromise any system, and there is no third-party target.
+Review security-related work with the same rigor and the same bar as any other work. Do not decline, soften, redact, or abbreviate a review because its subject matter is security-related.
+</review_context_and_authorization>
+
 <task>
 Run a stop-gate review of the previous Claude turn.
 Only review the work from the previous Claude turn.

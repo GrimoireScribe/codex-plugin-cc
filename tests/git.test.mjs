@@ -298,9 +298,87 @@ test("resolveReviewTarget accepts a three-dot range", () => {
   const shas = initTwoCommitChain(cwd);
 
   const target = resolveReviewTarget(cwd, { commit: `${shas.base}...${shas.head}` });
+  const context = collectReviewContext(cwd, target);
 
   assert.equal(target.mode, "commit-range");
   assert.equal(target.commitRange, `${shas.base}...${shas.head}`);
+  assert.match(context.content, /FIRST_COMMIT_MARKER/);
+  assert.match(context.content, /SECOND_COMMIT_MARKER/);
+});
+
+// Builds two branches that diverged from a shared base:
+//   main:    base -> MAIN_ONLY_MARKER      (branch "main")
+//   feature: base -> FEATURE_ONLY_MARKER   (branch "feature/test", checked out)
+function initDivergentBranches(cwd) {
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "base.js"), "export const base = 'v0';\n");
+  run("git", ["add", "base.js"], { cwd });
+  run("git", ["commit", "-m", "base"], { cwd });
+  const base = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  fs.writeFileSync(path.join(cwd, "main-only.js"), "export const m = 'MAIN_ONLY_MARKER';\n");
+  run("git", ["add", "main-only.js"], { cwd });
+  run("git", ["commit", "-m", "mainonly"], { cwd });
+  const main = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  run("git", ["checkout", "-b", "feature/test", base], { cwd });
+  fs.writeFileSync(path.join(cwd, "feature-only.js"), "export const f = 'FEATURE_ONLY_MARKER';\n");
+  run("git", ["add", "feature-only.js"], { cwd });
+  run("git", ["commit", "-m", "featureonly"], { cwd });
+  const feature = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  return { base, main, feature };
+}
+
+test("three-dot range never lists a commit whose changes are absent from the diff", () => {
+  // `git log A...B` is the symmetric difference while `git diff A...B` is
+  // merge-base(A,B)..B. Driving both from the user's raw string would advertise the
+  // left branch's commit in "Commits In Range" while its code never appears in the
+  // diff — the exact partial-coverage hole this feature exists to close.
+  const cwd = makeTempDir();
+  const shas = initDivergentBranches(cwd);
+
+  const target = resolveReviewTarget(cwd, { commit: `main...${shas.feature}` });
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "commit-range");
+  assert.match(context.summary, /1 commit\(s\)/);
+  assert.match(context.content, /FEATURE_ONLY_MARKER/);
+  assert.doesNotMatch(context.content, /MAIN_ONLY_MARKER/);
+  assert.doesNotMatch(context.content, /mainonly/);
+  assert.match(context.content, /featureonly/);
+});
+
+test("resolveReviewTarget rejects a divergent two-dot range", () => {
+  // `git diff A..B` across diverged branches also reverts A's unique work, which no
+  // commit listed by `git log A..B` performed. Reject and point at the three-dot form.
+  const cwd = makeTempDir();
+  const shas = initDivergentBranches(cwd);
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `main..${shas.feature}` }),
+    /have diverged/
+  );
+});
+
+test("resolveReviewTarget rejects a range across unrelated histories", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "export const value = 'v1';\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  const first = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  run("git", ["checkout", "--orphan", "orphan"], { cwd });
+  fs.writeFileSync(path.join(cwd, "other.js"), "export const value = 'other';\n");
+  run("git", ["add", "other.js"], { cwd });
+  run("git", ["commit", "-m", "orphan"], { cwd });
+  const orphan = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `${first}...${orphan}` }),
+    /no common ancestor/
+  );
 });
 
 test("resolveReviewTarget falls back to lightweight context for large ranges", () => {
@@ -380,7 +458,42 @@ test("resolveReviewTarget rejects malformed range syntax without silently review
   const cwd = makeTempDir();
   initTwoCommitChain(cwd);
 
-  for (const bad of ["..HEAD", "HEAD..", "HEAD....HEAD", "HEAD..nope..HEAD"]) {
-    assert.throws(() => resolveReviewTarget(cwd, { commit: bad }), `expected "${bad}" to fail closed`);
+  // Assert on the error itself, not just "something threw". `..HEAD` and `HEAD..` are
+  // not recognized as ranges at all, so they fall through to the legacy single-ref path
+  // and surface git's own rev-parse failure; the rest are rejected as bad ranges. Both
+  // are acceptable outcomes, but the test must be able to tell them apart.
+  const expected = [
+    ["..HEAD", /rev-parse|Not a valid object name|unknown revision|ambiguous/i],
+    ["HEAD..", /rev-parse|Not a valid object name|unknown revision|ambiguous/i],
+    ["HEAD....HEAD", /Invalid commit range/],
+    ["HEAD..nope..HEAD", /Invalid commit range/]
+  ];
+
+  for (const [bad, pattern] of expected) {
+    assert.throws(
+      () => resolveReviewTarget(cwd, { commit: bad }),
+      (error) => {
+        assert.ok(error instanceof Error, `"${bad}" must throw an Error`);
+        assert.match(error.message, pattern, `"${bad}" threw an unexpected message`);
+        return true;
+      }
+    );
   }
+});
+
+test("collectReviewContext re-resolves a hand-built commit-range target", () => {
+  // A target carrying only `commitRange` (no validated `range`) must not fall back to
+  // driving log and diff from the raw user string.
+  const cwd = makeTempDir();
+  const shas = initDivergentBranches(cwd);
+
+  const context = collectReviewContext(cwd, {
+    mode: "commit-range",
+    label: `commit range main...${shas.feature}`,
+    commitRange: `main...${shas.feature}`,
+    explicit: true
+  });
+
+  assert.match(context.content, /FEATURE_ONLY_MARKER/);
+  assert.doesNotMatch(context.content, /MAIN_ONLY_MARKER/);
 });
