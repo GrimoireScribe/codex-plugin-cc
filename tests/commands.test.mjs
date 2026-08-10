@@ -65,7 +65,11 @@ test("adversarial review command uses AskUserQuestion and background Bash while 
   assert.match(source, /When in doubt, run the review/i);
   assert.match(source, /\(Recommended\)/);
   assert.match(source, /uses the same review target selection as `\/codex:review`/i);
-  assert.match(source, /supports working-tree review, branch review, and `--base <ref>`/i);
+  assert.match(source, /supports working-tree review, branch review, `--base <ref>`, and `--commit <sha\|A\.\.B>`/i);
+  // The argument-hint and the body must not disagree about --commit: the model driving
+  // this command reads the body, so a hint-only mention leaves it with no sizing rule.
+  assert.match(source, /argument-hint:.*--commit <sha\|A\.\.B>/i);
+  assert.match(source, /For `--commit <A\.\.B>` range review/i);
   assert.match(source, /does not support `--scope staged` or `--scope unstaged`/i);
   assert.match(source, /can still take extra focus text after the flags/i);
 });

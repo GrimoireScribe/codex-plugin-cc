@@ -25,6 +25,8 @@ Execution mode rules:
   - For working-tree review, start with `git status --short --untracked-files=all`.
   - For working-tree review, also inspect both `git diff --shortstat --cached` and `git diff --shortstat`.
   - For base-branch review, use `git diff --shortstat <base>...HEAD`.
+  - For `--commit <sha>` review, use `git diff --shortstat <sha>^..<sha>`.
+  - For `--commit <A..B>` range review, use `git diff --shortstat A..B`. A range reviews every commit in it as one combined diff, so size it by the whole range.
   - Treat untracked files or directories as reviewable work for auto or working-tree review even when `git diff --shortstat` is empty.
   - Only conclude there is nothing to review when the relevant scope is actually empty.
   - Recommend waiting only when the scoped review is clearly tiny, roughly 1-2 files total and no sign of a broader directory-sized change.
@@ -41,7 +43,8 @@ Argument handling:
 - Do not weaken the adversarial framing or rewrite the user's focus text.
 - The companion script parses `--wait` and `--background`, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.
 - `/codex:adversarial-review` uses the same review target selection as `/codex:review`.
-- It supports working-tree review, branch review, and `--base <ref>`.
+- It supports working-tree review, branch review, `--base <ref>`, and `--commit <sha|A..B>`.
+- `--commit` takes a single SHA or a commit range (`A..B`, `A^..B`, `A...B`). A range is reviewed as one combined diff over every commit in it.
 - It does not support `--scope staged` or `--scope unstaged`.
 - Unlike `/codex:review`, it can still take extra focus text after the flags.
 

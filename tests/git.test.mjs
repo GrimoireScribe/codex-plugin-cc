@@ -51,6 +51,43 @@ test("git wrappers force shell: false after the caller options spread", () => {
   assert.match(source, /runCommandChecked\("git", args, \{ cwd, \.\.\.options, shell: false \}\)/);
 });
 
+test("every revision-taking git diff routes through the -- / --no-relative guard", () => {
+  // Two failure modes are only reachable in environments awkward to build in a unit test,
+  // so the guarantee is asserted against the source the way the shell: false rule is.
+  //
+  // 1. ENAMETOOLONG. git stat()s a bare revision argument to disambiguate revision from
+  //    path. When repo_path + 1 + range_string exceeds the platform limit (260 on
+  //    Windows) the stat fails and git ABORTS rather than falling back to revision
+  //    parsing: "fatal: failed to stat '<A>..<B>': Filename too long". A SHA-256 repo has
+  //    130-char ranges, so any checkout deeper than ~130 chars trips it — ordinary for
+  //    OneDrive paths and nested CI checkouts. Reproduced at a 132-char path: bare token
+  //    aborts, `--` succeeds.
+  // 2. diff.relative=true scopes the diff to the cwd, which can make a valid range look
+  //    empty and get it wrongly rejected. `--no-relative` defeats it.
+  const source = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "plugins", "codex", "scripts", "lib", "git.mjs"),
+    "utf8"
+  );
+  assert.match(source, /function diffRevisionArgs\(revisions\) \{\s*return \["--no-relative", \.\.\.revisions, "--"\];/);
+
+  // No `git diff` may take a revision without going through the helper. Flag any diff
+  // invocation that references a range/SHA variable but not diffRevisionArgs.
+  const offenders = [];
+  for (const line of source.split("\n")) {
+    if (!/\["diff"/.test(line)) {
+      continue;
+    }
+    if (/diffRevisionArgs/.test(line)) {
+      continue;
+    }
+    // Working-tree diffs legitimately take no revision at all.
+    if (/(commitRange|diffRange|Revisions|Sha|commitRef)/.test(line)) {
+      offenders.push(line.trim());
+    }
+  }
+  assert.deepEqual(offenders, [], "these git diff calls pass a revision without the -- / --no-relative guard");
+});
+
 test("default branch names with special characters are passed to git literally", () => {
   const cwd = makeTempDir();
   const branchName = "main&branch-helper&x";
@@ -439,8 +476,82 @@ test("resolveReviewTarget rejects a range that changes no files", () => {
 
   assert.throws(
     () => resolveReviewTarget(cwd, { commit: "HEAD^..HEAD" }),
-    /no file changes to review/
+    /leave no net change/
   );
+});
+
+test("resolveReviewTarget names the cause when a range's commits cancel out", () => {
+  // A real fix cycle that nets to zero (change, then revert) must not be reported as
+  // "no commits" — the reviewer's operator needs to know the commits exist but cancel.
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "export const value = 'v1';\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  fs.writeFileSync(path.join(cwd, "app.js"), "export const value = 'v2';\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "change"], { cwd });
+  const first = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+  run("git", ["revert", "--no-edit", first], { cwd });
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `${first}^..HEAD` }),
+    /2 commit\(s\) leave no net change/
+  );
+});
+
+test("commit range annotates a commit whose changes are undone later in the range", () => {
+  // The combined diff is the NET effect of the range, so a commit reverted inside the
+  // range legitimately has nothing in the diff. It still appears in the commit list, so
+  // it must be labelled — otherwise the reviewer believes it reviewed that commit.
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "base.js"), "export const base = 'v0';\n");
+  run("git", ["add", "base.js"], { cwd });
+  run("git", ["commit", "-m", "base"], { cwd });
+  fs.writeFileSync(path.join(cwd, "risky.js"), "export const bypass = 'BAD_AUTH_BYPASS';\n");
+  run("git", ["add", "risky.js"], { cwd });
+  run("git", ["commit", "-m", "risky"], { cwd });
+  const risky = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+  fs.rmSync(path.join(cwd, "risky.js"));
+  fs.writeFileSync(path.join(cwd, "safe.js"), "export const safe = 'SAFE_MARKER';\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "fix"], { cwd });
+
+  const target = resolveReviewTarget(cwd, { commit: `${risky}^..HEAD` });
+  const context = collectReviewContext(cwd, target);
+
+  assert.match(context.content, /SAFE_MARKER/);
+  // The risky commit's content is genuinely absent from the net diff...
+  assert.doesNotMatch(context.content, /BAD_AUTH_BYPASS/);
+  // ...so the commit list must say so rather than implying it was reviewed.
+  assert.match(context.content, /no net contribution/);
+  assert.match(context.content, /NET effect/);
+});
+
+test("commit range resolves correctly when invoked from a subdirectory", () => {
+  // `git diff` honors diff.relative, which scopes output to the cwd. Probing the range
+  // anywhere but the repo root made a valid range look empty and rejected it.
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  run("git", ["config", "diff.relative", "true"], { cwd });
+  fs.mkdirSync(path.join(cwd, "top"), { recursive: true });
+  fs.mkdirSync(path.join(cwd, "sub"), { recursive: true });
+  fs.writeFileSync(path.join(cwd, "sub", "keep.js"), "export const keep = 1;\n");
+  fs.writeFileSync(path.join(cwd, "top", "app.js"), "export const value = 'v1';\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  fs.writeFileSync(path.join(cwd, "top", "app.js"), "export const value = 'SUBDIR_MARKER';\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "change"], { cwd });
+  const first = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  const subdir = path.join(cwd, "sub");
+  const target = resolveReviewTarget(subdir, { commit: `${first}^..HEAD` });
+  const context = collectReviewContext(subdir, target);
+
+  assert.equal(target.mode, "commit-range");
+  assert.match(context.content, /SUBDIR_MARKER/);
 });
 
 test("resolveReviewTarget rejects a range endpoint that is not a commit", () => {
@@ -479,6 +590,138 @@ test("resolveReviewTarget rejects malformed range syntax without silently review
       }
     );
   }
+});
+
+test("single-SHA review of a root commit diffs against the empty tree", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "export const value = 'ROOT_COMMIT_MARKER';\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  const root = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  const target = resolveReviewTarget(cwd, { commit: root });
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "commit");
+  assert.match(context.summary, /root commit/);
+  assert.match(context.content, /ROOT_COMMIT_MARKER/);
+});
+
+test("ROOT^..HEAD reviews a first ship instead of failing on the missing parent", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "a.js"), "export const a = 'FIRST_SHIP_A';\n");
+  run("git", ["add", "a.js"], { cwd });
+  run("git", ["commit", "-m", "one"], { cwd });
+  const root = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+  fs.writeFileSync(path.join(cwd, "b.js"), "export const b = 'FIRST_SHIP_B';\n");
+  run("git", ["add", "b.js"], { cwd });
+  run("git", ["commit", "-m", "two"], { cwd });
+
+  const target = resolveReviewTarget(cwd, { commit: `${root}^..HEAD` });
+  const context = collectReviewContext(cwd, target, { maxInlineFiles: 5 });
+
+  assert.equal(target.mode, "commit-range");
+  assert.match(context.content, /FIRST_SHIP_A/);
+  assert.match(context.content, /FIRST_SHIP_B/);
+});
+
+test("a shallow-clone boundary commit is refused, not treated as a root commit", () => {
+  // `rev-parse <sha>^` and `rev-list --max-parents=0` are both fooled by the graft: they
+  // report a real commit as parentless. Treating it as a root would diff it against the
+  // empty tree and present whole files as newly created — a silent wrong answer where
+  // git previously failed loudly.
+  const origin = makeTempDir();
+  initGitRepo(origin);
+  fs.writeFileSync(path.join(origin, "app.js"), "line1\n");
+  run("git", ["add", "app.js"], { cwd: origin });
+  run("git", ["commit", "-m", "one"], { cwd: origin });
+  fs.writeFileSync(path.join(origin, "app.js"), "line1\nSHALLOW_ADDED_LINE\n");
+  run("git", ["add", "app.js"], { cwd: origin });
+  run("git", ["commit", "-m", "two"], { cwd: origin });
+
+  const clone = path.join(makeTempDir(), "shallow");
+  const originUrl = `file:///${origin.replace(/\\/g, "/")}`;
+  const cloneResult = run("git", ["clone", "--depth", "1", originUrl, clone], { cwd: origin });
+  if (cloneResult.status !== 0) {
+    return; // shallow clone unsupported in this environment; nothing to assert
+  }
+
+  // Precondition: the clone really is shallow, and both of the oracles one would reach
+  // for first are fooled by the graft — `rev-parse HEAD^` happily returns the parent SHA
+  // read out of the commit header even though that object is absent, and
+  // `rev-list --max-parents=0` names the boundary commit as the root.
+  assert.equal(run("git", ["rev-parse", "--is-shallow-repository"], { cwd: clone }).stdout.trim(), "true");
+  const head = run("git", ["rev-parse", "HEAD"], { cwd: clone }).stdout.trim();
+  assert.equal(run("git", ["rev-parse", "--verify", "HEAD^"], { cwd: clone }).status, 0);
+  assert.equal(run("git", ["rev-list", "--max-parents=0", "-n1", "HEAD"], { cwd: clone }).stdout.trim(), head);
+
+  assert.throws(
+    () => resolveReviewTarget(clone, { commit: "HEAD" }),
+    /shallow clone/
+  );
+});
+
+test("single-SHA review of an ordinary merge commit still works", () => {
+  // The empty-diff guard must not reject ordinary merges: a --no-ff merge of a diverged
+  // branch has a NON-empty first-parent diff.
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "base.js"), "export const base = 0;\n");
+  run("git", ["add", "base.js"], { cwd });
+  run("git", ["commit", "-m", "base"], { cwd });
+  run("git", ["checkout", "-b", "side"], { cwd });
+  fs.writeFileSync(path.join(cwd, "side.js"), "export const side = 'MERGED_SIDE_MARKER';\n");
+  run("git", ["add", "side.js"], { cwd });
+  run("git", ["commit", "-m", "side"], { cwd });
+  run("git", ["checkout", "main"], { cwd });
+  fs.writeFileSync(path.join(cwd, "main2.js"), "export const m = 2;\n");
+  run("git", ["add", "main2.js"], { cwd });
+  run("git", ["commit", "-m", "main2"], { cwd });
+  run("git", ["merge", "--no-ff", "side", "-m", "merged"], { cwd });
+
+  const target = resolveReviewTarget(cwd, { commit: "HEAD" });
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "commit");
+  assert.match(context.content, /MERGED_SIDE_MARKER/);
+});
+
+test("a merge commit with no net first-parent change is refused with merge-specific guidance", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "base.js"), "export const base = 0;\n");
+  run("git", ["add", "base.js"], { cwd });
+  run("git", ["commit", "-m", "base"], { cwd });
+  run("git", ["checkout", "-b", "side"], { cwd });
+  fs.writeFileSync(path.join(cwd, "side.js"), "export const side = 1;\n");
+  run("git", ["add", "side.js"], { cwd });
+  run("git", ["commit", "-m", "side"], { cwd });
+  run("git", ["checkout", "main"], { cwd });
+  fs.writeFileSync(path.join(cwd, "main2.js"), "export const m = 2;\n");
+  run("git", ["add", "main2.js"], { cwd });
+  run("git", ["commit", "-m", "main2"], { cwd });
+  run("git", ["merge", "-s", "ours", "side", "-m", "oursmerge"], { cwd });
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: "HEAD" }),
+    /merge commit that changes nothing/
+  );
+});
+
+test("single-SHA review of an empty commit is refused instead of reviewing nothing", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "export const value = 'v1';\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  run("git", ["commit", "--allow-empty", "-m", "empty"], { cwd });
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: "HEAD" }),
+    /changes no files/
+  );
 });
 
 test("collectReviewContext re-resolves a hand-built commit-range target", () => {

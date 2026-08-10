@@ -97,21 +97,88 @@ function resolveCommitEndpoint(cwd, endpoint, rangeRef) {
   return sha;
 }
 
-// Fails closed on every degenerate range: unknown endpoints, identical endpoints,
-// reversed endpoints, divergent two-dot endpoints, unrelated histories, and any range
-// whose diff is empty. An empty or misattributed review target must never silently
-// produce an "approve with no findings".
+// `--` stops git from resolving a revision argument against a same-named working-tree
+// path ("fatal: ambiguous argument '<A>..<B>': both revision and filename"). `--no-relative`
+// defeats `diff.relative=true`, which otherwise scopes the diff to the cwd and can make a
+// perfectly good range look empty when the command runs from a subdirectory.
+function diffRevisionArgs(revisions) {
+  return ["--no-relative", ...revisions, "--"];
+}
+
+// The empty tree is the only sane base for a root commit's diff. Let git compute the id
+// instead of hardcoding 4b825dc642cb6eb9a060e54bf8d69288fbee4904 — that is the SHA-1
+// value and it is a different object id in a SHA-256 repository, so the constant would
+// break exactly where it is hardest to notice.
+function getEmptyTreeSha(cwd) {
+  return gitChecked(cwd, ["hash-object", "-t", "tree", "--stdin"], { input: "" }).stdout.trim();
+}
+
+// Counts `parent` header lines on the raw commit object.
 //
-// The critical invariant this establishes is that the commit LIST and the combined DIFF
-// describe the same set of changes. `git log` and `git diff` disagree about what a range
-// means in two cases, and both would hand the reviewer a diff that no listed commit
+// This must NOT be done with `rev-parse <sha>^` or `rev-list --max-parents=0`: in a
+// shallow clone the graft hides a boundary commit's parents from the revision walk, so
+// both report a real commit as parentless. Treating that as a root commit would diff it
+// against the empty tree and hand the reviewer whole files as if the commit had created
+// them — a silent wrong answer where git previously failed loudly. The commit object
+// itself still carries the true parent headers, so read those.
+function readCommitParents(cwd, sha) {
+  const body = gitChecked(cwd, ["cat-file", "-p", `${sha}^{commit}`]).stdout;
+  const parents = [];
+  for (const line of body.split("\n")) {
+    if (!line.trim()) {
+      break; // headers end at the first blank line; the message follows
+    }
+    if (line.startsWith("parent ")) {
+      parents.push(line.slice("parent ".length).trim());
+    }
+  }
+  return parents;
+}
+
+function commitObjectExists(cwd, sha) {
+  return git(cwd, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]).status === 0;
+}
+
+// Resolves what a single commit should be diffed against, distinguishing a true root
+// commit (empty tree) from a shallow-clone boundary commit (hard error).
+function resolveCommitDiffBase(cwd, sha, displayRef) {
+  const parents = readCommitParents(cwd, sha);
+  if (parents.length === 0) {
+    return { base: getEmptyTreeSha(cwd), isRoot: true, parents };
+  }
+  const firstParent = parents[0];
+  if (!commitObjectExists(cwd, firstParent)) {
+    throw new Error(
+      `Commit "${displayRef}" sits on the boundary of a shallow clone: its parent ${firstParent} is not available locally, so its diff cannot be computed. Run \`git fetch --deepen <n>\` (or \`--unshallow\`) and retry.`
+    );
+  }
+  return { base: firstParent, isRoot: false, parents };
+}
+
+// Fails closed on every degenerate range: unknown endpoints, identical endpoints,
+// reversed endpoints, divergent two-dot endpoints, unrelated histories, shallow-clone
+// boundaries, and any range whose net diff is empty. An empty or misattributed review
+// target must never silently produce an "approve with no findings".
+//
+// What the canonical form does and does NOT guarantee:
+//
+// It DOES stop `git log` and `git diff` from being asked different questions. Left alone
+// they disagree in two ways, and both hand the reviewer a diff that no listed commit
 // produced:
 //   - `A...B`: log is the symmetric difference (both sides), diff is merge-base(A,B)..B.
 //   - `A..B` with divergent endpoints: log lists only B's commits, but diff also reverts
 //     A's unique work, so the reviewer sees deletions no listed commit performed.
-// Both are resolved here by reducing every accepted range to a single canonical
-// `<diffBase>..<rightSha>` form, which log and diff agree on by construction. Divergent
-// two-dot ranges are rejected outright and redirected to the three-dot form.
+// Both are resolved by reducing every accepted range to `<diffBase>..<rightSha>`, which
+// log and diff agree on. Divergent two-dot ranges are rejected and redirected to
+// three-dot; unrelated histories are rejected outright.
+//
+// It does NOT make every listed commit visible in the diff, and it cannot: a combined
+// range diff is by definition the NET effect of the range. A change introduced by one
+// commit and reverted by a later one inside the same range is correctly absent from the
+// net diff while both commits still appear in the log. That is git's semantics, not a
+// bug, but it is misleading if the reviewer is not told — so the commit list is annotated
+// per-commit and the section carries an explicit net-effect note. See
+// collectCommitRangeContext.
 function resolveCommitRange(cwd, commitRef) {
   const parsed = parseCommitRangeSyntax(commitRef);
   if (!parsed) {
@@ -123,58 +190,103 @@ function resolveCommitRange(cwd, commitRef) {
   // exact string whose endpoints were validated here.
   const range = `${left}${dots}${right}`;
   const symmetric = dots === "...";
-  const leftSha = resolveCommitEndpoint(cwd, left, range);
   const rightSha = resolveCommitEndpoint(cwd, right, range);
 
-  if (leftSha === rightSha) {
-    throw new Error(`Invalid commit range "${range}": both endpoints resolve to the same commit (empty diff).`);
+  // `ROOT^..HEAD` is PO's standing form applied to a repository's first ship, where the
+  // left endpoint cannot resolve because the root commit has no parent. Rather than
+  // failing on the one shape the standing rule guarantees, treat "<root>^" as the empty
+  // tree. Only a TRUE root qualifies — resolveCommitDiffBase rejects a shallow-clone
+  // boundary commit instead of silently pretending it created every file it touches.
+  const parentSuffix = /^(.+?)(?:\^|~1)$/.exec(left);
+  let rootBaseSha = "";
+  if (parentSuffix && git(cwd, ["rev-parse", "--verify", "--quiet", `${left}^{commit}`]).status !== 0) {
+    const candidate = git(cwd, ["rev-parse", "--verify", "--quiet", `${parentSuffix[1]}^{commit}`]);
+    if (candidate.status === 0) {
+      const candidateSha = candidate.stdout.trim();
+      const { base, isRoot } = resolveCommitDiffBase(cwd, candidateSha, left);
+      if (isRoot) {
+        rootBaseSha = base;
+      }
+    }
   }
 
-  const leftIsAncestor = git(cwd, ["merge-base", "--is-ancestor", leftSha, rightSha]).status === 0;
-  const rightIsAncestor = git(cwd, ["merge-base", "--is-ancestor", rightSha, leftSha]).status === 0;
-  if (!leftIsAncestor && rightIsAncestor) {
-    throw new Error(
-      `Invalid commit range "${range}": endpoints are reversed. "${right}" is an ancestor of "${left}" — use "${right}${dots}${left}".`
-    );
-  }
+  const leftSha = rootBaseSha || resolveCommitEndpoint(cwd, left, range);
 
   let diffBase;
-  if (symmetric) {
-    // Three-dot: the diff is merge-base(A,B)..B, so the commit list must be too.
-    const mergeBase = git(cwd, ["merge-base", leftSha, rightSha]);
-    const mergeBaseSha = mergeBase.status === 0 ? mergeBase.stdout.trim() : "";
-    if (!mergeBaseSha) {
+  if (rootBaseSha) {
+    // Empty tree -> right: every commit up to and including right is in the range.
+    diffBase = rootBaseSha;
+  } else {
+    if (leftSha === rightSha) {
+      throw new Error(`Invalid commit range "${range}": both endpoints resolve to the same commit (empty diff).`);
+    }
+
+    const leftIsAncestor = git(cwd, ["merge-base", "--is-ancestor", leftSha, rightSha]).status === 0;
+    const rightIsAncestor = git(cwd, ["merge-base", "--is-ancestor", rightSha, leftSha]).status === 0;
+    if (!leftIsAncestor && rightIsAncestor) {
       throw new Error(
-        `Invalid commit range "${range}": "${left}" and "${right}" have no common ancestor, so there is no range to review.`
+        `Invalid commit range "${range}": endpoints are reversed. "${right}" is an ancestor of "${left}" — use "${right}${dots}${left}".`
       );
     }
-    diffBase = mergeBaseSha;
-  } else if (!leftIsAncestor) {
-    throw new Error(
-      `Invalid commit range "${range}": "${left}" and "${right}" have diverged, so the two-dot diff would also revert work unique to "${left}" that no commit in the range performed. Use "${left}...${right}" to review only the commits unique to "${right}".`
-    );
-  } else {
-    diffBase = leftSha;
+
+    if (symmetric) {
+      // Three-dot: the diff is merge-base(A,B)..B, so the commit list must be too.
+      const mergeBase = git(cwd, ["merge-base", leftSha, rightSha]);
+      const mergeBaseSha = mergeBase.status === 0 ? mergeBase.stdout.trim() : "";
+      if (!mergeBaseSha) {
+        throw new Error(
+          `Invalid commit range "${range}": "${left}" and "${right}" have no common ancestor, so there is no range to review.`
+        );
+      }
+      diffBase = mergeBaseSha;
+    } else if (!leftIsAncestor) {
+      throw new Error(
+        `Invalid commit range "${range}": "${left}" and "${right}" have diverged, so the two-dot diff would also revert work unique to "${left}" that no commit in the range performed. Use "${left}...${right}" to review only the commits unique to "${right}".`
+      );
+    } else {
+      diffBase = leftSha;
+    }
   }
 
-  // Every downstream git invocation uses this canonical form, not the user's string, so
-  // the commit log and the diff cannot disagree. Resolved SHAs also cannot be shadowed
-  // by a same-named path, and `--` makes that explicit.
-  const diffRange = `${diffBase}..${rightSha}`;
-  const changedFiles = gitChecked(cwd, ["diff", "--name-only", diffRange, "--"]).stdout.trim();
+  // Every downstream git invocation uses these resolved SHAs, not the user's string, so
+  // the commit log and the diff cannot be asked different questions.
+  const isRootRange = Boolean(rootBaseSha);
+  const diffRevisions = isRootRange ? [diffBase, rightSha] : [`${diffBase}..${rightSha}`];
+  const logRevisions = isRootRange ? [rightSha] : [`${diffBase}..${rightSha}`];
+  const displayRange = `${diffBase.slice(0, 12)}..${rightSha.slice(0, 12)}`;
+
+  const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffRevisionArgs(diffRevisions)]).stdout.trim();
   if (!changedFiles) {
-    throw new Error(`Invalid commit range "${range}": the range contains no file changes to review.`);
+    const commitCount = gitChecked(cwd, ["rev-list", "--count", ...logRevisions, "--"]).stdout.trim();
+    const cause =
+      commitCount === "0"
+        ? "the range contains no commits"
+        : `its ${commitCount} commit(s) leave no net change (an empty commit, or work introduced and reverted within the range)`;
+    throw new Error(`Invalid commit range "${range}": ${cause}, so there is nothing to review.`);
   }
 
-  return { range, diffRange, left, right, dots, leftSha, rightSha, diffBase };
+  return {
+    range,
+    diffRevisions,
+    logRevisions,
+    displayRange,
+    isRootRange,
+    left,
+    right,
+    dots,
+    leftSha,
+    rightSha,
+    diffBase
+  };
 }
 
 function buildBranchComparison(cwd, baseRef) {
   const mergeBase = gitChecked(cwd, ["merge-base", "HEAD", baseRef]).stdout.trim();
+  // Only `commitRange` is used. A second, differently-scoped range string sitting next to
+  // it is a trap waiting to be picked up by mistake, so it is not kept here.
   return {
     mergeBase,
-    commitRange: `${mergeBase}..HEAD`,
-    reviewRange: `${baseRef}...HEAD`
+    commitRange: `${mergeBase}..HEAD`
   };
 }
 
@@ -235,12 +347,42 @@ export function getWorkingTreeState(cwd) {
   };
 }
 
+// Resolves a single `--commit <sha>` target. Root commits diff against the empty tree
+// instead of dying on `<sha>^`, shallow-clone boundaries fail loudly rather than
+// pretending the commit created every file it touches, and a commit with no net change
+// is rejected rather than producing a silent empty review.
+function resolveSingleCommit(cwd, commitRef) {
+  const sha = gitChecked(cwd, ["rev-parse", "--verify", `${commitRef}^{commit}`]).stdout.trim();
+  const { base, isRoot, parents } = resolveCommitDiffBase(cwd, sha, commitRef);
+  const diffRevisions = [base, sha];
+  const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffRevisionArgs(diffRevisions)]).stdout.trim();
+
+  if (!changedFiles) {
+    // An ordinary --no-ff merge has a NON-empty first-parent diff, so this fires only on
+    // the narrow cases (`-s ours`, or a side branch already applied to the mainline).
+    // Say so explicitly — a bare "changes no files" on a merge SHA reads as a tool bug.
+    if (parents.length > 1) {
+      throw new Error(
+        `Commit "${commitRef}" is a merge commit that changes nothing relative to its first parent, so there is nothing to review. To review the merged-in work, pass a range such as --commit ${base.slice(0, 12)}..${parents[1].slice(0, 12)}.`
+      );
+    }
+    throw new Error(`Commit "${commitRef}" changes no files, so there is nothing to review.`);
+  }
+
+  return { sha, base, isRoot, parents, diffRevisions };
+}
+
 export function resolveReviewTarget(cwd, options = {}) {
   ensureGitRepository(cwd);
 
   const commitRef = options.commit ?? null;
   if (commitRef) {
-    const range = resolveCommitRange(cwd, commitRef);
+    // Resolve against the repo root, not the caller's cwd. `git diff` honors
+    // `diff.relative`, which scopes output to the current directory — from a subdirectory
+    // that makes a perfectly good range look empty and wrongly rejects it. The
+    // working-tree and branch paths were always immune because they probe at the root.
+    const repoRoot = getRepoRoot(cwd);
+    const range = resolveCommitRange(repoRoot, commitRef);
     if (range) {
       return {
         mode: "commit-range",
@@ -250,11 +392,12 @@ export function resolveReviewTarget(cwd, options = {}) {
         explicit: true
       };
     }
-    gitChecked(cwd, ["rev-parse", "--verify", commitRef]);
+    const commit = resolveSingleCommit(repoRoot, commitRef);
     return {
       mode: "commit",
       label: `commit ${commitRef}`,
       commitRef,
+      commit,
       explicit: true
     };
   }
@@ -399,9 +542,9 @@ function collectBranchContext(cwd, baseRef, options = {}) {
   const includeDiff = options.includeDiff !== false;
   const comparison = options.comparison ?? buildBranchComparison(cwd, baseRef);
   const currentBranch = getCurrentBranch(cwd);
-  const changedFiles = gitChecked(cwd, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean);
-  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", comparison.commitRange]).stdout.trim();
-  const diffStat = gitChecked(cwd, ["diff", "--stat", comparison.commitRange]).stdout.trim();
+  const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffRevisionArgs([comparison.commitRange])]).stdout.trim().split("\n").filter(Boolean);
+  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", comparison.commitRange, "--"]).stdout.trim();
+  const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffRevisionArgs([comparison.commitRange])]).stdout.trim();
 
   return {
     mode: "branch",
@@ -412,7 +555,7 @@ function collectBranchContext(cwd, baseRef, options = {}) {
           formatSection("Diff Stat", diffStat),
           formatSection(
             "Branch Diff",
-            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", comparison.commitRange]).stdout
+            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", ...diffRevisionArgs([comparison.commitRange])]).stdout
           )
         ].join("\n")
       : [
@@ -427,15 +570,18 @@ function collectBranchContext(cwd, baseRef, options = {}) {
 
 function collectCommitContext(cwd, commitRef, options = {}) {
   const includeDiff = options.includeDiff !== false;
-  const diffRange = `${commitRef}^..${commitRef}`;
-  const changedFiles = gitChecked(cwd, ["diff", "--name-only", diffRange]).stdout.trim().split("\n").filter(Boolean);
+  const commit = options.commit ?? resolveSingleCommit(cwd, commitRef);
+  const diffArgs = diffRevisionArgs(commit.diffRevisions);
+  const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffArgs]).stdout.trim().split("\n").filter(Boolean);
   const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", "-1", commitRef]).stdout.trim();
   const commitMessage = gitChecked(cwd, ["log", "--format=%B", "-1", commitRef]).stdout.trim();
-  const diffStat = gitChecked(cwd, ["diff", "--stat", diffRange]).stdout.trim();
+  const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffArgs]).stdout.trim();
 
   return {
     mode: "commit",
-    summary: `Reviewing commit ${commitRef}.`,
+    summary: commit.isRoot
+      ? `Reviewing commit ${commitRef} (the repository's root commit, diffed against the empty tree).`
+      : `Reviewing commit ${commitRef}.`,
     content: includeDiff
       ? [
           formatSection("Commit", logOutput),
@@ -443,7 +589,7 @@ function collectCommitContext(cwd, commitRef, options = {}) {
           formatSection("Diff Stat", diffStat),
           formatSection(
             "Commit Diff",
-            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", diffRange]).stdout
+            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", ...diffArgs]).stdout
           )
         ].join("\n")
       : [
@@ -457,38 +603,79 @@ function collectCommitContext(cwd, commitRef, options = {}) {
   };
 }
 
+// A combined range diff is the NET effect of the range, so a commit whose changes were
+// reverted later inside the same range appears in the log with nothing to show for it in
+// the diff. Silently listing it invites the reviewer to believe it reviewed that commit.
+// Annotate those commits explicitly instead.
+function annotateNetEffect(cwd, logOutput, changedFiles) {
+  if (!logOutput) {
+    return logOutput;
+  }
+  const netFiles = new Set(changedFiles);
+  return logOutput
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const sha = line.split(/\s/, 1)[0];
+      if (!sha) {
+        return line;
+      }
+      const touched = git(cwd, ["show", "--pretty=format:", "--name-only", sha, "--"]);
+      if (touched.status !== 0) {
+        return line;
+      }
+      const files = touched.stdout.trim().split("\n").filter(Boolean);
+      if (!files.length || files.some((file) => netFiles.has(file))) {
+        return line;
+      }
+      return `${line}  [no net contribution: this commit's changes are undone later within the range]`;
+    })
+    .join("\n");
+}
+
 function collectCommitRangeContext(cwd, range, options = {}) {
   const includeDiff = options.includeDiff !== false;
-  // The canonical <diffBase>..<right> form, never the user's raw string — see
-  // resolveCommitRange for why log and diff must be driven by the same range.
-  const diffRange = range.diffRange;
-  const changedFiles = gitChecked(cwd, ["diff", "--name-only", diffRange, "--"]).stdout.trim().split("\n").filter(Boolean);
-  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", diffRange, "--"]).stdout.trim();
-  const commitMessages = gitChecked(cwd, ["log", "--format=%h %B%n---", diffRange, "--"]).stdout.trim();
-  const diffStat = gitChecked(cwd, ["diff", "--stat", diffRange, "--"]).stdout.trim();
-  const commitCount = logOutput ? logOutput.split("\n").filter(Boolean).length : 0;
+  // Resolved SHAs, never the user's raw string — see resolveCommitRange for why log and
+  // diff must be asked the same question.
+  const diffArgs = diffRevisionArgs(range.diffRevisions);
+  const logArgs = [...range.logRevisions, "--"];
+  const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffArgs]).stdout.trim().split("\n").filter(Boolean);
+  const rawLog = gitChecked(cwd, ["log", "--oneline", "--decorate", ...logArgs]).stdout.trim();
+  const logOutput = annotateNetEffect(cwd, rawLog, changedFiles);
+  const commitMessages = gitChecked(cwd, ["log", "--format=%h %B%n---", ...logArgs]).stdout.trim();
+  const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffArgs]).stdout.trim();
+  const commitCount = rawLog ? rawLog.split("\n").filter(Boolean).length : 0;
+  const netEffectNote = [
+    `(Diffed as ${range.displayRange}. The diff below is the NET effect of all ${commitCount} commit(s),`,
+    "not a replay of each one: work introduced and then reverted within this range is",
+    "correctly absent from it. A commit annotated \"no net contribution\" left nothing behind.",
+    "That annotation is FILE-level, so a commit only PARTIALLY undone later is not flagged —",
+    "its file still appears in the diff while some of its hunks do not. Do not treat the",
+    "commit list as proof that every listed commit's changes are visible below; if a commit",
+    "matters to a finding, check it directly with `git show`.)"
+  ].join(" ");
 
   return {
     mode: "commit-range",
-    summary: `Reviewing commit range ${range.range} (${commitCount} commit(s), ${diffRange}) as one combined diff.`,
+    summary: `Reviewing commit range ${range.range} (${commitCount} commit(s), diffed as ${range.displayRange}) as one combined diff.`,
     content: includeDiff
       ? [
-          formatSection("Commits In Range", logOutput),
+          formatSection("Commits In Range", `${netEffectNote}\n\n${logOutput}`),
           formatSection("Commit Messages", commitMessages),
           formatSection("Diff Stat", diffStat),
           formatSection(
             "Combined Range Diff",
-            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", diffRange, "--"]).stdout
+            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", ...diffArgs]).stdout
           )
         ].join("\n")
       : [
-          formatSection("Commits In Range", logOutput),
+          formatSection("Commits In Range", `${netEffectNote}\n\n${logOutput}`),
           formatSection("Commit Messages", commitMessages),
           formatSection("Diff Stat", diffStat),
           formatSection("Changed Files", changedFiles.join("\n"))
         ].join("\n"),
     changedFiles,
-    commitRange: diffRange
+    commitRange: range.range
   };
 }
 
@@ -510,24 +697,27 @@ export function collectReviewContext(cwd, target, options = {}) {
   let diffBytes;
 
   if (target.mode === "commit") {
-    const diffRange = `${target.commitRef}^..${target.commitRef}`;
-    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", diffRange]).stdout.trim().split("\n").filter(Boolean).length;
+    // Re-resolve when the target was hand-built: without the validated revisions a root
+    // commit dies on `<sha>^` and a shallow boundary silently diffs against nothing.
+    const commit = target.commit?.diffRevisions ? target.commit : resolveSingleCommit(repoRoot, target.commitRef);
+    const diffArgs = diffRevisionArgs(commit.diffRevisions);
+    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", ...diffArgs]).stdout.trim().split("\n").filter(Boolean).length;
     diffBytes = measureGitOutputBytes(
       repoRoot,
-      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", diffRange],
+      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", ...diffArgs],
       maxInlineDiffBytes
     );
     includeDiff = options.includeDiff ?? (fileCount <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
-    details = collectCommitContext(repoRoot, target.commitRef, { includeDiff });
+    details = collectCommitContext(repoRoot, target.commitRef, { includeDiff, commit });
   } else if (target.mode === "commit-range") {
-    // Re-resolve rather than trusting a hand-built target: without a validated
-    // `diffRange` the log and the diff can describe different commits.
-    const range = target.range?.diffRange ? target.range : resolveCommitRange(repoRoot, target.commitRange);
-    const diffRange = range.diffRange;
-    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", diffRange, "--"]).stdout.trim().split("\n").filter(Boolean).length;
+    // Re-resolve rather than trusting a hand-built target: without validated revisions
+    // the log and the diff can describe different commits.
+    const range = target.range?.diffRevisions ? target.range : resolveCommitRange(repoRoot, target.commitRange);
+    const diffArgs = diffRevisionArgs(range.diffRevisions);
+    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", ...diffArgs]).stdout.trim().split("\n").filter(Boolean).length;
     diffBytes = measureGitOutputBytes(
       repoRoot,
-      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", diffRange, "--"],
+      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", ...diffArgs],
       maxInlineDiffBytes
     );
     includeDiff = options.includeDiff ?? (fileCount <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
@@ -552,10 +742,10 @@ export function collectReviewContext(cwd, target, options = {}) {
     });
   } else {
     const comparison = buildBranchComparison(repoRoot, target.baseRef);
-    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", comparison.commitRange]).stdout.trim().split("\n").filter(Boolean).length;
+    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", ...diffRevisionArgs([comparison.commitRange])]).stdout.trim().split("\n").filter(Boolean).length;
     diffBytes = measureGitOutputBytes(
       repoRoot,
-      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", comparison.commitRange],
+      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", ...diffRevisionArgs([comparison.commitRange])],
       maxInlineDiffBytes
     );
     includeDiff = options.includeDiff ?? (fileCount <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
