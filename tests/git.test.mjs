@@ -223,3 +223,164 @@ test("collectReviewContext keeps untracked file content in lightweight working t
   assert.match(context.content, /## Untracked Files/);
   assert.match(context.content, /UNTRACKED_RISK_MARKER/);
 });
+
+// --- Commit range review support -------------------------------------------------
+
+// NOTE: helpers.run spawns with shell: true on Windows, so commit messages must stay
+// single-word — a multi-word -m argument is concatenated unquoted and git reads the
+// trailing words as pathspecs, silently producing no commit.
+function initTwoCommitChain(cwd) {
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "base.js"), "export const base = 'v0';\n");
+  run("git", ["add", "base.js"], { cwd });
+  run("git", ["commit", "-m", "base"], { cwd });
+  fs.writeFileSync(path.join(cwd, "first.js"), "export const first = 'FIRST_COMMIT_MARKER';\n");
+  run("git", ["add", "first.js"], { cwd });
+  run("git", ["commit", "-m", "first"], { cwd });
+  fs.writeFileSync(path.join(cwd, "second.js"), "export const second = 'SECOND_COMMIT_MARKER';\n");
+  run("git", ["add", "second.js"], { cwd });
+  run("git", ["commit", "-m", "second"], { cwd });
+  return {
+    base: run("git", ["rev-parse", "HEAD~2"], { cwd }).stdout.trim(),
+    first: run("git", ["rev-parse", "HEAD~1"], { cwd }).stdout.trim(),
+    head: run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim()
+  };
+}
+
+test("resolveReviewTarget keeps single-SHA commit review unchanged", () => {
+  const cwd = makeTempDir();
+  const shas = initTwoCommitChain(cwd);
+
+  const target = resolveReviewTarget(cwd, { commit: shas.head });
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "commit");
+  assert.equal(target.commitRef, shas.head);
+  assert.equal(target.label, `commit ${shas.head}`);
+  assert.match(context.content, /## Commit Diff/);
+  assert.match(context.content, /SECOND_COMMIT_MARKER/);
+  // The single-SHA path must still see ONLY that commit.
+  assert.doesNotMatch(context.content, /FIRST_COMMIT_MARKER/);
+});
+
+test("resolveReviewTarget reviews FIRST^..HEAD as one combined range diff", () => {
+  const cwd = makeTempDir();
+  const shas = initTwoCommitChain(cwd);
+
+  const target = resolveReviewTarget(cwd, { commit: `${shas.first}^..HEAD` });
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "commit-range");
+  assert.equal(target.commitRange, `${shas.first}^..HEAD`);
+  assert.equal(target.label, `commit range ${shas.first}^..HEAD`);
+  assert.equal(context.fileCount, 2);
+  assert.match(context.summary, /2 commit\(s\)/);
+  assert.match(context.content, /## Combined Range Diff/);
+  // Both commits' changes must be visible to the reviewer — the coverage hole this fixes.
+  assert.match(context.content, /FIRST_COMMIT_MARKER/);
+  assert.match(context.content, /SECOND_COMMIT_MARKER/);
+});
+
+test("resolveReviewTarget accepts an explicit two-dot SHA range", () => {
+  const cwd = makeTempDir();
+  const shas = initTwoCommitChain(cwd);
+
+  const target = resolveReviewTarget(cwd, { commit: `${shas.base}..${shas.head}` });
+  const context = collectReviewContext(cwd, target);
+
+  assert.equal(target.mode, "commit-range");
+  assert.match(context.content, /FIRST_COMMIT_MARKER/);
+  assert.match(context.content, /SECOND_COMMIT_MARKER/);
+});
+
+test("resolveReviewTarget accepts a three-dot range", () => {
+  const cwd = makeTempDir();
+  const shas = initTwoCommitChain(cwd);
+
+  const target = resolveReviewTarget(cwd, { commit: `${shas.base}...${shas.head}` });
+
+  assert.equal(target.mode, "commit-range");
+  assert.equal(target.commitRange, `${shas.base}...${shas.head}`);
+});
+
+test("resolveReviewTarget falls back to lightweight context for large ranges", () => {
+  const cwd = makeTempDir();
+  const shas = initTwoCommitChain(cwd);
+
+  const target = resolveReviewTarget(cwd, { commit: `${shas.first}^..HEAD` });
+  const context = collectReviewContext(cwd, target, { maxInlineFiles: 1 });
+
+  assert.equal(context.inputMode, "self-collect");
+  assert.match(context.content, /## Changed Files/);
+  assert.doesNotMatch(context.content, /FIRST_COMMIT_MARKER/);
+});
+
+test("resolveReviewTarget rejects a range with an unknown endpoint", () => {
+  const cwd = makeTempDir();
+  const shas = initTwoCommitChain(cwd);
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef..${shas.head}` }),
+    /does not resolve to a commit/
+  );
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `${shas.base}..deadbeefdeadbeefdeadbeefdeadbeefdeadbeef` }),
+    /does not resolve to a commit/
+  );
+});
+
+test("resolveReviewTarget rejects a range whose endpoints are identical", () => {
+  const cwd = makeTempDir();
+  const shas = initTwoCommitChain(cwd);
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `${shas.head}..HEAD` }),
+    /same commit \(empty diff\)/
+  );
+});
+
+test("resolveReviewTarget rejects a reversed range", () => {
+  const cwd = makeTempDir();
+  const shas = initTwoCommitChain(cwd);
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `${shas.head}..${shas.base}` }),
+    /endpoints are reversed/
+  );
+});
+
+test("resolveReviewTarget rejects a range that changes no files", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "app.js"), "export const value = 'v1';\n");
+  run("git", ["add", "app.js"], { cwd });
+  run("git", ["commit", "-m", "init"], { cwd });
+  // An empty commit advances HEAD without touching any file: a range over it is a
+  // real range with a real endpoint but nothing to review.
+  run("git", ["commit", "--allow-empty", "-m", "empty"], { cwd });
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: "HEAD^..HEAD" }),
+    /no file changes to review/
+  );
+});
+
+test("resolveReviewTarget rejects a range endpoint that is not a commit", () => {
+  const cwd = makeTempDir();
+  const shas = initTwoCommitChain(cwd);
+  const treeSha = run("git", ["rev-parse", "HEAD^{tree}"], { cwd }).stdout.trim();
+
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `${treeSha}..${shas.head}` }),
+    /does not resolve to a commit/
+  );
+});
+
+test("resolveReviewTarget rejects malformed range syntax without silently reviewing nothing", () => {
+  const cwd = makeTempDir();
+  initTwoCommitChain(cwd);
+
+  for (const bad of ["..HEAD", "HEAD..", "HEAD....HEAD", "HEAD..nope..HEAD"]) {
+    assert.throws(() => resolveReviewTarget(cwd, { commit: bad }), `expected "${bad}" to fail closed`);
+  }
+});

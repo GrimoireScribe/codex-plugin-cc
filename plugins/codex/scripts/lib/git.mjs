@@ -66,6 +66,79 @@ function measureCombinedGitOutputBytes(cwd, argSets, maxBytes) {
   return totalBytes;
 }
 
+// Commit-range review support (2026-08-10). PO's standing rule for multi-commit ships is
+// to pass `FIRST^..HEAD` to every reviewer; before this, `--commit` validated with a bare
+// `rev-parse --verify`, so a range exited 1 and PO fell back to a single SHA — leaving the
+// second commit of a 2-commit ship unreviewed by Codex while Gemini saw the full range.
+// Git refnames cannot contain "..", so the presence of a two/three-dot separator is an
+// unambiguous range signal and single SHAs keep their existing path untouched.
+const COMMIT_RANGE_PATTERN = /^(.+?)(\.{2,3})(.+)$/;
+
+function parseCommitRangeSyntax(ref) {
+  const match = COMMIT_RANGE_PATTERN.exec(String(ref).trim());
+  if (!match) {
+    return null;
+  }
+  const [, left, dots, right] = match;
+  return { left: left.trim(), dots, right: right.trim() };
+}
+
+function resolveCommitEndpoint(cwd, endpoint, rangeRef) {
+  // `^{commit}` rejects trees, blobs, and annotated-tag-to-non-commit peels, so a
+  // syntactically valid but non-commit endpoint fails closed instead of producing a
+  // nonsense diff.
+  const result = git(cwd, ["rev-parse", "--verify", "--quiet", `${endpoint}^{commit}`]);
+  const sha = result.status === 0 ? result.stdout.trim() : "";
+  if (!sha) {
+    throw new Error(
+      `Invalid commit range "${rangeRef}": "${endpoint}" does not resolve to a commit in this repository.`
+    );
+  }
+  return sha;
+}
+
+// Fails closed on every degenerate range: unknown endpoints, identical endpoints,
+// reversed endpoints, and any range whose diff is empty. An empty review target must
+// never silently produce an "approve with no findings".
+function resolveCommitRange(cwd, commitRef) {
+  const parsed = parseCommitRangeSyntax(commitRef);
+  if (!parsed) {
+    return null;
+  }
+
+  const { left, right, dots } = parsed;
+  // Normalize away surrounding whitespace so every downstream git invocation uses the
+  // exact string whose endpoints were validated here.
+  const range = `${left}${dots}${right}`;
+  const leftSha = resolveCommitEndpoint(cwd, left, range);
+  const rightSha = resolveCommitEndpoint(cwd, right, range);
+
+  if (leftSha === rightSha) {
+    throw new Error(`Invalid commit range "${range}": both endpoints resolve to the same commit (empty diff).`);
+  }
+
+  // Reversed range: the right endpoint is an ancestor of the left. Divergent branches
+  // (neither side an ancestor of the other) stay allowed — that is a legitimate
+  // cross-branch comparison, not a reversal.
+  const leftIsAncestor = git(cwd, ["merge-base", "--is-ancestor", leftSha, rightSha]).status === 0;
+  const rightIsAncestor = git(cwd, ["merge-base", "--is-ancestor", rightSha, leftSha]).status === 0;
+  if (!leftIsAncestor && rightIsAncestor) {
+    throw new Error(
+      `Invalid commit range "${range}": endpoints are reversed. "${right}" is an ancestor of "${left}" — use "${right}${dots}${left}".`
+    );
+  }
+
+  // `--` keeps git from resolving the range against a same-named path, and an empty
+  // file list here means there is nothing to review — never let that reach the model
+  // as a silently empty review.
+  const changedFiles = gitChecked(cwd, ["diff", "--name-only", range, "--"]).stdout.trim();
+  if (!changedFiles) {
+    throw new Error(`Invalid commit range "${range}": the range contains no file changes to review.`);
+  }
+
+  return { range, left, right, dots, leftSha, rightSha };
+}
+
 function buildBranchComparison(cwd, baseRef) {
   const mergeBase = gitChecked(cwd, ["merge-base", "HEAD", baseRef]).stdout.trim();
   return {
@@ -137,6 +210,16 @@ export function resolveReviewTarget(cwd, options = {}) {
 
   const commitRef = options.commit ?? null;
   if (commitRef) {
+    const range = resolveCommitRange(cwd, commitRef);
+    if (range) {
+      return {
+        mode: "commit-range",
+        label: `commit range ${range.range}`,
+        commitRange: range.range,
+        range,
+        explicit: true
+      };
+    }
     gitChecked(cwd, ["rev-parse", "--verify", commitRef]);
     return {
       mode: "commit",
@@ -344,6 +427,39 @@ function collectCommitContext(cwd, commitRef, options = {}) {
   };
 }
 
+function collectCommitRangeContext(cwd, range, options = {}) {
+  const includeDiff = options.includeDiff !== false;
+  const diffRange = range.range;
+  const changedFiles = gitChecked(cwd, ["diff", "--name-only", diffRange]).stdout.trim().split("\n").filter(Boolean);
+  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", diffRange]).stdout.trim();
+  const commitMessages = gitChecked(cwd, ["log", "--format=%h %B%n---", diffRange]).stdout.trim();
+  const diffStat = gitChecked(cwd, ["diff", "--stat", diffRange]).stdout.trim();
+  const commitCount = logOutput ? logOutput.split("\n").filter(Boolean).length : 0;
+
+  return {
+    mode: "commit-range",
+    summary: `Reviewing commit range ${diffRange} (${commitCount} commit(s)) as one combined diff.`,
+    content: includeDiff
+      ? [
+          formatSection("Commits In Range", logOutput),
+          formatSection("Commit Messages", commitMessages),
+          formatSection("Diff Stat", diffStat),
+          formatSection(
+            "Combined Range Diff",
+            gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff", diffRange]).stdout
+          )
+        ].join("\n")
+      : [
+          formatSection("Commits In Range", logOutput),
+          formatSection("Commit Messages", commitMessages),
+          formatSection("Diff Stat", diffStat),
+          formatSection("Changed Files", changedFiles.join("\n"))
+        ].join("\n"),
+    changedFiles,
+    commitRange: diffRange
+  };
+}
+
 function buildAdversarialCollectionGuidance(options = {}) {
   if (options.includeDiff !== false) {
     return "Use the repository context below as primary evidence.";
@@ -371,6 +487,17 @@ export function collectReviewContext(cwd, target, options = {}) {
     );
     includeDiff = options.includeDiff ?? (fileCount <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
     details = collectCommitContext(repoRoot, target.commitRef, { includeDiff });
+  } else if (target.mode === "commit-range") {
+    const range = target.range ?? { range: target.commitRange };
+    const diffRange = range.range;
+    const fileCount = gitChecked(repoRoot, ["diff", "--name-only", diffRange]).stdout.trim().split("\n").filter(Boolean).length;
+    diffBytes = measureGitOutputBytes(
+      repoRoot,
+      ["diff", "--binary", "--no-ext-diff", "--submodule=diff", diffRange],
+      maxInlineDiffBytes
+    );
+    includeDiff = options.includeDiff ?? (fileCount <= maxInlineFiles && diffBytes <= maxInlineDiffBytes);
+    details = collectCommitRangeContext(repoRoot, range, { includeDiff });
   } else if (target.mode === "working-tree") {
     const state = getWorkingTreeState(repoRoot);
     diffBytes = measureCombinedGitOutputBytes(
