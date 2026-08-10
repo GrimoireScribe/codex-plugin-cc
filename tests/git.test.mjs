@@ -68,7 +68,10 @@ test("every revision-taking git diff routes through the -- / --no-relative guard
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "plugins", "codex", "scripts", "lib", "git.mjs"),
     "utf8"
   );
-  assert.match(source, /function diffRevisionArgs\(revisions\) \{\s*return \["--no-relative", \.\.\.revisions, "--"\];/);
+  assert.match(
+    source,
+    /function diffRevisionArgs\(revisions\) \{\s*return \["--no-color", "--no-relative", \.\.\.revisions, "--"\];/
+  );
 
   // Every `git diff` / `git log` invocation must either go through the helper or end with
   // an explicit `--`. This is an ALLOWLIST, not a heuristic: gating on revision-looking
@@ -76,13 +79,27 @@ test("every revision-taking git diff routes through the -- / --no-relative guard
   // variable, which is exactly when the guarantee needs checking.
   const ALLOWED_UNTERMINATED = [
     // Working-tree diffs take no revision at all, so there is nothing to disambiguate.
-    '["diff", "--cached", "--name-only"]',
-    '["diff", "--name-only"]',
-    '["diff", "--shortstat", "--cached"]',
-    '["diff", "--shortstat"]',
-    '["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]',
-    '["diff", "--binary", "--no-ext-diff", "--submodule=diff"]'
+    // They still carry --no-color: color.ui=always would otherwise inject ANSI escape
+    // sequences into the diff text embedded in the review prompt.
+    '["diff", "--no-color", "--cached", "--name-only"]',
+    '["diff", "--no-color", "--name-only"]',
+    '["diff", "--no-color", "--shortstat", "--cached"]',
+    '["diff", "--no-color", "--shortstat"]',
+    '["diff", "--no-color", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]',
+    '["diff", "--no-color", "--binary", "--no-ext-diff", "--submodule=diff"]'
   ];
+
+  // Nothing may emit color into the prompt: every git verb that renders diff or log text
+  // must disable it explicitly, since color.ui=always overrides the not-a-tty default.
+  const colorless = [];
+  for (const match of source.replace(/\s*\n\s*/g, " ").match(/\[\s*"(diff|log|show)"[^\]]*\]/g) ?? []) {
+    const call = match.replace(/\s+/g, " ");
+    const inheritsGuard = call.includes("diffRevisionArgs") || call.includes("...diffArgs");
+    if (!call.includes("--no-color") && !call.includes("--pretty=format:") && !inheritsGuard) {
+      colorless.push(call);
+    }
+  }
+  assert.deepEqual(colorless, [], "these git calls render text without --no-color");
 
   // Call sites may also spread a pre-built argument array. That is only safe if the array
   // itself was built with the guard, so each such name is pinned to its construction
@@ -91,33 +108,51 @@ test("every revision-taking git diff routes through the -- / --no-relative guard
   assert.match(source, /const logArgs = \[\.\.\.range\.logRevisions, "--"\];/);
   const PREBUILT_ARG_NAMES = ["...diffArgs", "...logArgs"];
 
+  // Scan the source with newlines collapsed. A line-by-line scan silently misses a call
+  // split across lines, which is the shape a formatter produces the moment an argument
+  // list gets long — the scan would keep passing while the guarantee rotted.
+  const flat = source.replace(/\s*\n\s*/g, " ");
+
+  // Every verb that disambiguates a revision from a path is covered, not just diff/log.
+  // `show` and `rev-list` take revisions too and are equally exposed to ENAMETOOLONG.
+  const REVISION_VERBS = /\[\s*"(diff|log|show|rev-list)"[^\]]*\]/g;
+
   const offenders = [];
   const usedAllowances = new Set();
-  for (const rawLine of source.split("\n")) {
-    const line = rawLine.trim();
-    if (!/\["(diff|log)"/.test(line)) {
+  for (const match of flat.match(REVISION_VERBS) ?? []) {
+    const call = match.replace(/\s+/g, " ");
+    if (/diffRevisionArgs/.test(call)) {
       continue;
     }
-    if (/diffRevisionArgs/.test(line)) {
+    if (PREBUILT_ARG_NAMES.some((name) => call.includes(name))) {
       continue;
     }
-    if (PREBUILT_ARG_NAMES.some((name) => line.includes(name))) {
-      continue;
-    }
-    const allowance = ALLOWED_UNTERMINATED.find((entry) => line.includes(entry));
+    const allowance = ALLOWED_UNTERMINATED.find((entry) => call.includes(entry));
     if (allowance) {
       usedAllowances.add(allowance);
       continue;
     }
-    if (/"--"\]/.test(line)) {
+    if (/"--"\s*\]/.test(call)) {
       continue;
     }
-    offenders.push(line);
+    offenders.push(call);
   }
   assert.deepEqual(
     offenders,
     [],
-    "these git diff/log calls take a revision without the -- / --no-relative guard"
+    "these git calls take a revision without the -- / --no-relative guard"
+  );
+
+  // A literal-verb scan cannot see `[verb, ...]` where verb is computed. Rather than
+  // pretend otherwise, require every git argument list in this module to START with a
+  // string literal, so the scan above provably sees all of them.
+  const computed = (flat.match(/\bgit(?:Checked)?\(\s*[A-Za-z_$][\w$.]*\s*,\s*\[\s*[^"\s\]]/g) ?? []).map((entry) =>
+    entry.trim()
+  );
+  assert.deepEqual(
+    computed,
+    [],
+    "git argument lists must begin with a literal verb so the revision-guard scan can see them"
   );
 
   // A stale allowlist entry is itself a hole: it would keep silently excusing a call
@@ -640,6 +675,114 @@ test("a merge commit is never annotated on missing evidence", () => {
   assert.doesNotMatch(context.content, /no file this commit touched appears/);
 });
 
+test("a conflict-resolved merge is never annotated on its partial --cc file list", () => {
+  // `git show` on a merge renders the dense-combined (--cc) view, which lists ONLY files
+  // differing from EVERY parent. A clean merge yields an empty list; a conflict-resolved
+  // merge yields a small PARTIAL one. Gating on the empty list alone let the partial case
+  // through, branding a merge as contributing nothing while it was the sole reason a file
+  // was in the combined diff.
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "conflict.txt"), "orig\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "base"], { cwd });
+  const base = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  run("git", ["checkout", "-b", "side"], { cwd });
+  fs.writeFileSync(path.join(cwd, "conflict.txt"), "a\n");
+  fs.writeFileSync(path.join(cwd, "side.js"), "export const s = 'MERGE_CARRIED_MARKER';\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "sidework"], { cwd });
+
+  run("git", ["checkout", "main"], { cwd });
+  fs.writeFileSync(path.join(cwd, "conflict.txt"), "x\n");
+  fs.writeFileSync(path.join(cwd, "main2.js"), "export const m = 2;\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "mainwork"], { cwd });
+
+  run("git", ["merge", "side", "-m", "evilmerge"], { cwd }); // conflicts
+  fs.writeFileSync(path.join(cwd, "conflict.txt"), "EVIL\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "--no-edit"], { cwd });
+  const mergeSha = run("git", ["rev-parse", "--short", "HEAD"], { cwd }).stdout.trim();
+  // Restore the conflicted file so its path drops out of the net diff. This makes the
+  // merge's partial --cc list (conflict.txt) disjoint from the net file set.
+  fs.writeFileSync(path.join(cwd, "conflict.txt"), "orig\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "restore"], { cwd });
+
+  const target = resolveReviewTarget(cwd, { commit: `${base}..HEAD` });
+  const context = collectReviewContext(cwd, target, { maxInlineFiles: 10 });
+
+  // The merge is the only reason the side work is in the combined diff...
+  assert.match(context.content, /MERGE_CARRIED_MARKER/);
+  assert.match(context.content, /Merge commits are never annotated/);
+  // ...so the MERGE line specifically must carry no mark. (The later "restore" commit is
+  // legitimately annotated — its own change really is absent from the net diff.)
+  const mergeLine = context.content
+    .split("\n")
+    .find((line) => line.startsWith(mergeSha) || line.includes(` ${mergeSha} `));
+  assert.ok(mergeLine, `expected the merge commit ${mergeSha} in the commit list`);
+  assert.doesNotMatch(mergeLine, /no file this commit touched appears/);
+});
+
+test("the mainline root still supports ROOT^..HEAD in a repository with a second root", () => {
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "main1.js"), "export const a = 'MAINLINE_FIRST';\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "mainroot"], { cwd });
+  const mainRoot = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  run("git", ["checkout", "--orphan", "imported"], { cwd });
+  run("git", ["rm", "-rf", "."], { cwd });
+  fs.writeFileSync(path.join(cwd, "vendor.js"), "export const v = 'VENDORED';\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "secondroot"], { cwd });
+  const secondRoot = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  run("git", ["checkout", "main"], { cwd });
+  run("git", ["merge", "--allow-unrelated-histories", "imported", "-m", "mergeimport"], { cwd });
+
+  // The mainline root's parent legitimately means "everything from the beginning".
+  const target = resolveReviewTarget(cwd, { commit: `${mainRoot}^..HEAD` });
+  const context = collectReviewContext(cwd, target, { maxInlineFiles: 50 });
+  assert.equal(target.mode, "commit-range");
+  assert.match(context.content, /MAINLINE_FIRST/);
+
+  // A merged-in root's parent must be refused, naming the real cause.
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `${secondRoot}^..HEAD` }),
+    /merged into this history/
+  );
+});
+
+test("annotation marks survive color.ui=always", () => {
+  // Without --no-color the sha token becomes an ANSI-wrapped string, every per-commit
+  // lookup fails, and the marks silently vanish while the note still claims they exist.
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  run("git", ["config", "color.ui", "always"], { cwd });
+  fs.writeFileSync(path.join(cwd, "base.js"), "export const base = 0;\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "base"], { cwd });
+  fs.writeFileSync(path.join(cwd, "risky.js"), "export const r = 'COLOR_BYPASS_MARKER';\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "risky"], { cwd });
+  const risky = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+  fs.rmSync(path.join(cwd, "risky.js"));
+  fs.writeFileSync(path.join(cwd, "safe.js"), "export const s = 1;\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "fix"], { cwd });
+
+  const target = resolveReviewTarget(cwd, { commit: `${risky}^..HEAD` });
+  const context = collectReviewContext(cwd, target);
+
+  assert.match(context.content, /no file this commit touched appears/);
+  // And no raw escape codes leak into the prompt.
+  assert.doesNotMatch(context.content, /\[/);
+});
+
 test("a second root in the repository does not silently expand ROOT^..HEAD to everything", () => {
   // "<X> is a root, so use the empty tree" only holds when X is the ONLY root reachable
   // from the right endpoint. With a merged-in orphan branch (git subtree, imported repo)
@@ -667,14 +810,12 @@ test("a second root in the repository does not silently expand ROOT^..HEAD to ev
   run("git", ["commit", "-m", "followup"], { cwd });
 
   // Must NOT quietly review the whole repository as if the second root were THE root.
-  let target = null;
-  try {
-    target = resolveReviewTarget(cwd, { commit: `${secondRoot}^..HEAD` });
-  } catch {
-    return; // refused outright, which is the safe outcome
-  }
-  const context = collectReviewContext(cwd, target, { maxInlineFiles: 50 });
-  assert.doesNotMatch(context.content, /PREDATES_THE_SHIP/);
+  // Asserted on the specific rejection, not "threw for some reason" — a try/catch that
+  // returns early would keep passing if a future edit made every range throw.
+  assert.throws(
+    () => resolveReviewTarget(cwd, { commit: `${secondRoot}^..HEAD` }),
+    /merged into this history rather than the root/
+  );
 });
 
 test("commit range resolves correctly when invoked from a subdirectory", () => {

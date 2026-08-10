@@ -101,8 +101,10 @@ function resolveCommitEndpoint(cwd, endpoint, rangeRef) {
 // path ("fatal: ambiguous argument '<A>..<B>': both revision and filename"). `--no-relative`
 // defeats `diff.relative=true`, which otherwise scopes the diff to the cwd and can make a
 // perfectly good range look empty when the command runs from a subdirectory.
+// `--no-color` keeps a user's `color.ui=always` from injecting ANSI escape sequences into
+// the diff text that gets embedded in the review prompt.
 function diffRevisionArgs(revisions) {
-  return ["--no-relative", ...revisions, "--"];
+  return ["--no-color", "--no-relative", ...revisions, "--"];
 }
 
 // The empty tree is the only sane base for a root commit's diff. Let git compute the id
@@ -205,19 +207,29 @@ function resolveCommitRange(cwd, commitRef) {
       const candidateSha = candidate.stdout.trim();
       const { base, isRoot } = resolveCommitDiffBase(cwd, candidateSha, left);
       // "<X> is a root, so the empty tree is the right base" only holds when X is the
-      // ONLY root reachable from the right endpoint. A repository can have several —
-      // `git subtree add`, a merged-in orphan branch, an imported repo. In that case the
-      // empty tree silently expands the range to the ENTIRE repository and every commit
-      // in it, including history that predates the ship. Baseline failed loudly here;
-      // turning that into a silently over-scoped review is the exact failure class the
-      // rest of this resolver exists to prevent.
+      // repository's MAINLINE root. A repo can have several — `git subtree add`, a
+      // merged-in orphan branch, an imported repo. Substituting the empty tree for a
+      // merged-in root's parent silently expands the range to the ENTIRE repository and
+      // all of its history, including work that predates the ship; baseline failed
+      // loudly there, and turning that into a silently over-scoped review is the exact
+      // failure class the rest of this resolver exists to prevent.
+      //
+      // The discriminator is the FIRST-PARENT root: walking first parents from the right
+      // endpoint reaches the mainline's own root, not the roots that were merged in.
+      // `<mainlineRoot>^..HEAD` means "everything from the beginning", which is what the
+      // form asks for and is safe even in a multi-root repo. Anything else is refused
+      // with a message that names the real cause.
       if (isRoot) {
-        const roots = gitChecked(cwd, ["rev-list", "--max-parents=0", rightSha, "--"])
+        const firstParentRoot = gitChecked(cwd, ["rev-list", "--first-parent", "--max-parents=0", rightSha, "--"])
           .stdout.trim()
           .split("\n")
-          .filter(Boolean);
-        if (roots.length === 1 && roots[0] === candidateSha) {
+          .filter(Boolean)[0];
+        if (firstParentRoot === candidateSha) {
           rootBaseSha = base;
+        } else {
+          throw new Error(
+            `Invalid commit range "${range}": "${parentSuffix[1]}" is a root commit that was merged into this history rather than the root "${right}" is built on, so "${left}" would silently expand the review to the entire repository. Use "${parentSuffix[1]}...${right}" to review only the commits it brought in, or pass an explicit base.`
+          );
         }
       }
     }
@@ -356,8 +368,8 @@ export function getCurrentBranch(cwd) {
 }
 
 export function getWorkingTreeState(cwd) {
-  const staged = gitChecked(cwd, ["diff", "--cached", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
-  const unstaged = gitChecked(cwd, ["diff", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
+  const staged = gitChecked(cwd, ["diff", "--no-color", "--cached", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
+  const unstaged = gitChecked(cwd, ["diff", "--no-color", "--name-only"]).stdout.trim().split("\n").filter(Boolean);
   const untracked = gitChecked(cwd, ["ls-files", "--others", "--exclude-standard"]).stdout.trim().split("\n").filter(Boolean);
 
   return {
@@ -525,8 +537,8 @@ function collectWorkingTreeContext(cwd, state, options = {}) {
 
   let parts;
   if (includeDiff) {
-    const stagedDiff = gitChecked(cwd, ["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
-    const unstagedDiff = gitChecked(cwd, ["diff", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
+    const stagedDiff = gitChecked(cwd, ["diff", "--no-color", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
+    const unstagedDiff = gitChecked(cwd, ["diff", "--no-color", "--binary", "--no-ext-diff", "--submodule=diff"]).stdout;
     const untrackedBody = includeUntrackedContents
       ? state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n")
       : formatUntrackedSummary(state.untracked);
@@ -537,8 +549,8 @@ function collectWorkingTreeContext(cwd, state, options = {}) {
       formatSection("Untracked Files", untrackedBody)
     ];
   } else {
-    const stagedStat = gitChecked(cwd, ["diff", "--shortstat", "--cached"]).stdout.trim();
-    const unstagedStat = gitChecked(cwd, ["diff", "--shortstat"]).stdout.trim();
+    const stagedStat = gitChecked(cwd, ["diff", "--no-color", "--shortstat", "--cached"]).stdout.trim();
+    const unstagedStat = gitChecked(cwd, ["diff", "--no-color", "--shortstat"]).stdout.trim();
     const untrackedBody = includeUntrackedContents
       ? state.untracked.map((file) => formatUntrackedFile(cwd, file)).join("\n\n")
       : formatUntrackedSummary(state.untracked);
@@ -564,7 +576,7 @@ function collectBranchContext(cwd, baseRef, options = {}) {
   const comparison = options.comparison ?? buildBranchComparison(cwd, baseRef);
   const currentBranch = getCurrentBranch(cwd);
   const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffRevisionArgs([comparison.commitRange])]).stdout.trim().split("\n").filter(Boolean);
-  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", comparison.commitRange, "--"]).stdout.trim();
+  const logOutput = gitChecked(cwd, ["log", "--no-color", "--oneline", "--decorate", comparison.commitRange, "--"]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffRevisionArgs([comparison.commitRange])]).stdout.trim();
 
   return {
@@ -594,8 +606,8 @@ function collectCommitContext(cwd, commitRef, options = {}) {
   const commit = options.commit ?? resolveSingleCommit(cwd, commitRef);
   const diffArgs = diffRevisionArgs(commit.diffRevisions);
   const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffArgs]).stdout.trim().split("\n").filter(Boolean);
-  const logOutput = gitChecked(cwd, ["log", "--oneline", "--decorate", "-1", commitRef, "--"]).stdout.trim();
-  const commitMessage = gitChecked(cwd, ["log", "--format=%B", "-1", commitRef, "--"]).stdout.trim();
+  const logOutput = gitChecked(cwd, ["log", "--no-color", "--oneline", "--decorate", "-1", commitRef, "--"]).stdout.trim();
+  const commitMessage = gitChecked(cwd, ["log", "--no-color", "--format=%B", "-1", commitRef, "--"]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffArgs]).stdout.trim();
 
   return {
@@ -650,17 +662,20 @@ const MAX_ANNOTATED_RANGE_COMMITS = 100;
 // The oracle's file set is computed here rather than reusing the review's own changed-file
 // list, so the user-visible "Changed Files" section keeps rename detection and only this
 // comparison uses the no-renames view.
+// Returns { log, annotated }. `annotated: false` means the marks could not be computed at
+// all, which the caller MUST disclose — an unmarked commit would otherwise read as
+// "checked and present" when nothing was checked.
 function annotateNetEffect(cwd, logOutput, diffArgs, commitCount) {
   if (!logOutput || commitCount > MAX_ANNOTATED_RANGE_COMMITS) {
-    return logOutput;
+    return { log: logOutput, annotated: false };
   }
   const netProbe = git(cwd, ["diff", "--name-only", "--no-renames", ...diffArgs]);
   if (netProbe.status !== 0) {
-    return logOutput; // cannot compute the oracle; annotate nothing rather than guess
+    return { log: logOutput, annotated: false }; // oracle unavailable; say so, do not guess
   }
   const netFiles = new Set(netProbe.stdout.trim().split("\n").filter(Boolean));
 
-  return logOutput
+  const log = logOutput
     .split("\n")
     .filter(Boolean)
     .map((line) => {
@@ -668,26 +683,28 @@ function annotateNetEffect(cwd, logOutput, diffArgs, commitCount) {
       if (!sha) {
         return line;
       }
+      // Parent count is read FIRST, because `git show` on a merge is not a usable
+      // contribution oracle at all. It renders the dense-combined (--cc) view, which
+      // lists only files differing from EVERY parent — so a clean merge yields an empty
+      // list and a conflict-resolved merge yields a small, partial one. Gating on the
+      // empty list alone let a merge with a manual resolution fall through and be branded
+      // as contributing nothing while it was the sole reason a file was in the diff.
+      // A merge is never annotated: the evidence does not exist either way.
+      let parents;
+      try {
+        parents = readCommitParents(cwd, sha);
+      } catch {
+        return line;
+      }
+      if (parents.length > 1) {
+        return line;
+      }
       const touched = git(cwd, ["show", "--pretty=format:", "--name-only", "--no-renames", sha, "--"]);
       if (touched.status !== 0) {
         return line;
       }
       const files = touched.stdout.trim().split("\n").filter(Boolean);
-      if (!files.length) {
-        // `git show` prints no file list for a merge commit, so an empty list is "cannot
-        // tell" there and must not be read as "contributed nothing". For an ordinary
-        // commit an empty list really is definitive. Gate on parent count, not on the
-        // empty list alone.
-        let parentCount = 2;
-        try {
-          parentCount = readCommitParents(cwd, sha).length;
-        } catch {
-          return line;
-        }
-        if (parentCount > 1) {
-          return line;
-        }
-      } else if (files.some((file) => netFiles.has(file))) {
+      if (files.length && files.some((file) => netFiles.has(file))) {
         return line;
       }
       // Describes exactly what was checked — file paths — not what was inferred. A note
@@ -695,6 +712,8 @@ function annotateNetEffect(cwd, logOutput, diffArgs, commitCount) {
       return `${line}  [no file this commit touched appears in the combined diff below]`;
     })
     .join("\n");
+
+  return { log, annotated: true };
 }
 
 function collectCommitRangeContext(cwd, range, options = {}) {
@@ -704,20 +723,22 @@ function collectCommitRangeContext(cwd, range, options = {}) {
   const diffArgs = diffRevisionArgs(range.diffRevisions);
   const logArgs = [...range.logRevisions, "--"];
   const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffArgs]).stdout.trim().split("\n").filter(Boolean);
-  const rawLog = gitChecked(cwd, ["log", "--oneline", "--decorate", ...logArgs]).stdout.trim();
+  // `--no-color` because a user with color.ui=always turns every sha into an ANSI-wrapped
+  // token: the annotation's per-commit lookups then all fail, every mark silently
+  // disappears, and escape codes leak into the prompt.
+  const rawLog = gitChecked(cwd, ["log", "--no-color", "--oneline", "--decorate", ...logArgs]).stdout.trim();
   const commitCount = rawLog ? rawLog.split("\n").filter(Boolean).length : 0;
-  const logOutput = annotateNetEffect(cwd, rawLog, diffArgs, commitCount);
-  const commitMessages = gitChecked(cwd, ["log", "--format=%h %B%n---", ...logArgs]).stdout.trim();
+  const { log: logOutput, annotated } = annotateNetEffect(cwd, rawLog, diffArgs, commitCount);
+  const commitMessages = gitChecked(cwd, ["log", "--no-color", "--format=%h %B%n---", ...logArgs]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffArgs]).stdout.trim();
   const target = includeDiff ? "the combined diff below" : "the combined diff (not inlined here)";
-  const annotated = commitCount <= MAX_ANNOTATED_RANGE_COMMITS;
   const netEffectNote = [
     `(${range.reviewCommand}.`,
     `That diff is the NET effect of all ${commitCount} commit(s), not a replay of each one:`,
     "work introduced and then reverted within this range is correctly absent from it.",
     annotated
-      ? `An annotated commit is one where no file it touched appears in ${target}; that check compares FILE PATHS only, so a commit whose changes were only PARTIALLY undone later is NOT annotated — its file still appears while some of its hunks do not.`
-      : `This range exceeds ${MAX_ANNOTATED_RANGE_COMMITS} commits, so per-commit contribution marks were NOT computed: the absence of a mark here means nothing was checked, not that nothing was undone.`,
+      ? `An annotated commit is one where no file it touched appears in ${target}; that check compares FILE PATHS only, so a commit whose changes were only PARTIALLY undone later is NOT annotated — its file still appears while some of its hunks do not. Merge commits are never annotated, because git does not report a usable file list for them.`
+      : "Per-commit contribution marks were NOT computed for this range (too many commits, or the check could not run): the absence of a mark here means nothing was checked, not that nothing was undone.",
     "Do not treat the commit list as proof that every listed commit's changes are present.",
     "If a commit matters to a finding, check it directly with `git show <sha>`.)"
   ].join(" ");
@@ -794,8 +815,8 @@ export function collectReviewContext(cwd, target, options = {}) {
     diffBytes = measureCombinedGitOutputBytes(
       repoRoot,
       [
-        ["diff", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"],
-        ["diff", "--binary", "--no-ext-diff", "--submodule=diff"]
+        ["diff", "--no-color", "--cached", "--binary", "--no-ext-diff", "--submodule=diff"],
+        ["diff", "--no-color", "--binary", "--no-ext-diff", "--submodule=diff"]
       ],
       maxInlineDiffBytes
     );
