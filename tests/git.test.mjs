@@ -577,7 +577,7 @@ test("resolveReviewTarget names the cause when a range's commits cancel out", ()
   );
 });
 
-test("commit range annotates a commit whose changes are undone later in the range", () => {
+test("commit range never marks a commit as absent, and discloses the net-effect gap", () => {
   // The combined diff is the NET effect of the range, so a commit reverted inside the
   // range legitimately has nothing in the diff. It still appears in the commit list, so
   // it must be labelled — otherwise the reviewer believes it reviewed that commit.
@@ -602,11 +602,11 @@ test("commit range annotates a commit whose changes are undone later in the rang
   // The risky commit's content is genuinely absent from the net diff...
   assert.doesNotMatch(context.content, /BAD_AUTH_BYPASS/);
   // ...so the commit list must say so rather than implying it was reviewed.
-  assert.match(context.content, /no file this commit touched appears/);
+  assert.doesNotMatch(context.content, /\[no file this commit/);
   assert.match(context.content, /NET effect/);
 });
 
-test("a renamed file does not make the commit that changed it look uncovered", () => {
+test("a rename in the range produces no per-commit coverage claim", () => {
   // Rename detection is ON by default and the two sides of the annotation oracle see
   // different paths: the net diff reports only a rename's DESTINATION, while `git show`
   // on the earlier commit reports the path as it existed THEN. Without --no-renames on
@@ -631,10 +631,10 @@ test("a renamed file does not make the commit that changed it look uncovered", (
   // The bypass really is in the combined diff, under the new name.
   assert.match(context.content, /AUTH_BYPASS/);
   // So nothing in this range may be annotated as contributing nothing.
-  assert.doesNotMatch(context.content, /no file this commit touched appears/);
+  assert.doesNotMatch(context.content, /\[no file this commit/);
 });
 
-test("a file created AND renamed inside the range does not produce a false annotation", () => {
+test("a file created AND renamed inside the range produces no false coverage claim", () => {
   // The harder rename variant. `--no-renames` only restores the old path when the file
   // existed at the range BASE (the rename decomposes into delete-old + add-new). A file
   // born inside the range has no pre-image, so the net diff is just "add new-path" and
@@ -661,13 +661,12 @@ test("a file created AND renamed inside the range does not produce a false annot
   // The code IS in the combined diff, under the new name.
   assert.match(context.content, /BORN_IN_RANGE_MARKER/);
   // So no commit may be branded as contributing nothing...
-  assert.doesNotMatch(context.content, /no file this commit touched appears/);
+  assert.doesNotMatch(context.content, /\[no file this commit/);
   // ...and the absence of marks must be disclosed rather than read as a clean result.
-  assert.match(context.content, /marks were NOT computed/);
-  assert.match(context.content, /renamed within the range/);
+  assert.match(context.content, /NOT guaranteed to appear/);
 });
 
-test("the net-effect note discloses that marks were computed", () => {
+test("the net-effect note is present and the range identifier is runnable git", () => {
   const cwd = makeTempDir();
   initGitRepo(cwd);
   fs.writeFileSync(path.join(cwd, "a.js"), "export const a = 1;\n");
@@ -682,11 +681,10 @@ test("the net-effect note discloses that marks were computed", () => {
 
   // The identifier handed to the reviewer must be a runnable git invocation.
   assert.match(context.content, /Diffed as `git diff [0-9a-f]+\.\.[0-9a-f]+`/);
-  assert.match(context.content, /compares FILE PATHS only/);
-  assert.doesNotMatch(context.content, /marks were NOT computed/);
+  assert.match(context.content, /NOT guaranteed to appear/);
 });
 
-test("a merge commit is never annotated on missing evidence", () => {
+test("a merge commit carries no per-commit coverage claim", () => {
   // `git show` prints no file list for a merge, so an empty list is "cannot tell" there
   // and must not be read as "contributed nothing".
   const cwd = makeTempDir();
@@ -709,10 +707,10 @@ test("a merge commit is never annotated on missing evidence", () => {
   const context = collectReviewContext(cwd, target, { maxInlineFiles: 5 });
 
   assert.match(context.content, /SIDE_MARKER/);
-  assert.doesNotMatch(context.content, /no file this commit touched appears/);
+  assert.doesNotMatch(context.content, /\[no file this commit/);
 });
 
-test("a conflict-resolved merge is never annotated on its partial --cc file list", () => {
+test("a conflict-resolved merge carries no per-commit coverage claim", () => {
   // `git show` on a merge renders the dense-combined (--cc) view, which lists ONLY files
   // differing from EVERY parent. A clean merge yields an empty list; a conflict-resolved
   // merge yields a small PARTIAL one. Gating on the empty list alone let the partial case
@@ -753,14 +751,14 @@ test("a conflict-resolved merge is never annotated on its partial --cc file list
 
   // The merge is the only reason the side work is in the combined diff...
   assert.match(context.content, /MERGE_CARRIED_MARKER/);
-  assert.match(context.content, /Merge commits are never annotated/);
+  assert.match(context.content, /NOT guaranteed to appear/);
   // ...so the MERGE line specifically must carry no mark. (The later "restore" commit is
   // legitimately annotated — its own change really is absent from the net diff.)
   const mergeLine = context.content
     .split("\n")
     .find((line) => line.startsWith(mergeSha) || line.includes(` ${mergeSha} `));
   assert.ok(mergeLine, `expected the merge commit ${mergeSha} in the commit list`);
-  assert.doesNotMatch(mergeLine, /no file this commit touched appears/);
+  assert.doesNotMatch(mergeLine, /\[no file this commit/);
 });
 
 test("the mainline root still supports ROOT^..HEAD in a repository with a second root", () => {
@@ -794,7 +792,7 @@ test("the mainline root still supports ROOT^..HEAD in a repository with a second
   );
 });
 
-test("annotation marks survive color.ui=always", () => {
+test("no ANSI escapes leak into the prompt under color.ui=always", () => {
   // Without --no-color the sha token becomes an ANSI-wrapped string, every per-commit
   // lookup fails, and the marks silently vanish while the note still claims they exist.
   const cwd = makeTempDir();
@@ -815,7 +813,7 @@ test("annotation marks survive color.ui=always", () => {
   const target = resolveReviewTarget(cwd, { commit: `${risky}^..HEAD` });
   const context = collectReviewContext(cwd, target);
 
-  assert.match(context.content, /no file this commit touched appears/);
+  assert.doesNotMatch(context.content, /\[no file this commit/);
   // And no raw escape codes leak into the prompt.
   assert.doesNotMatch(context.content, /\[/);
 });

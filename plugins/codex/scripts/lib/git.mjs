@@ -178,9 +178,8 @@ function resolveCommitDiffBase(cwd, sha, displayRef) {
 // range diff is by definition the NET effect of the range. A change introduced by one
 // commit and reverted by a later one inside the same range is correctly absent from the
 // net diff while both commits still appear in the log. That is git's semantics, not a
-// bug, but it is misleading if the reviewer is not told — so the commit list is annotated
-// per-commit and the section carries an explicit net-effect note. See
-// collectCommitRangeContext.
+// bug, but it is misleading if the reviewer is not told — so the commit list carries an
+// explicit, unconditional net-effect caveat. See collectCommitRangeContext.
 function resolveCommitRange(cwd, commitRef) {
   const parsed = parseCommitRangeSyntax(commitRef);
   if (!parsed) {
@@ -644,110 +643,26 @@ function collectCommitContext(cwd, commitRef, options = {}) {
   };
 }
 
-// One `git show` per commit, and the review can walk this path TWICE — collectReviewContext
-// runs again on the prompt-size fallback — so the measured cost doubles in the worst case
-// (~4s per 60 commits here, so ~13s at this cap, ~26s across both runs). Past this many
-// commits the marks are not computed, and the note says so rather than leaving their
-// absence to be misread as "nothing was undone".
-const MAX_ANNOTATED_RANGE_COMMITS = 100;
-
-// A combined range diff is the NET effect of the range, so a commit whose changes were
-// reverted later inside the same range appears in the log with nothing to show for it in
-// the diff. Silently listing it invites the reviewer to believe it reviewed that commit.
-// Annotate those commits explicitly instead.
+// A combined range diff is the NET effect of the range, not a replay of each commit, so a
+// listed commit's changes are not necessarily visible in it. That is git's semantics, but
+// a reviewer told "3 commits in scope" that sees no trace of an auth bypass added in
+// commit 2 and removed in commit 3 will report "reviewed 3 commits, no auth issues" and be
+// right about what it was handed. The gap is real and must be disclosed.
 //
-// Renames defeat this oracle, and the whole range is skipped when one is present.
+// It is disclosed in prose, NOT by marking individual commits. Five successive attempts at
+// a per-commit "this one contributed nothing" oracle each shipped a new way to make an
+// AFFIRMATIVE FALSE CLAIM about the one commit that mattered — the failure the mark existed
+// to prevent, inverted. Every attempt was path-based, and every path-transforming operation
+// broke it in a new way: renames of files that existed at the base, renames of files born
+// inside the range, renames performed by a merge commit (invisible to `git log --name-status`),
+// renames below the -M similarity threshold, and `diff.renameLimit` overflow degrading
+// rename detection silently. A content-based oracle fails differently: a commit whose file
+// was modified again later has no surviving blob, so it would be branded too.
 //
-// The two sides see different paths: the net diff reports a rename's DESTINATION, while
-// `git show` on an earlier commit reports the path as it existed THEN. So "commit X adds
-// auth.js" + "commit Y renames it to authentication.js" makes X's file set disjoint from
-// the net set, and X is branded as contributing nothing while its change sits in the diff
-// under the new name — an affirmative false claim steering the reviewer away from the one
-// commit that matters, which is strictly worse than the omission this annotation exists
-// to fix.
-//
-// `--no-renames` on both probes handles only the case where the file existed at the range
-// BASE (the rename decomposes into delete-old + add-new, putting the old path back in the
-// net diff). It does NOT help when the file is both CREATED and renamed inside the range:
-// the net diff is then just "add new-path", and the old path appears nowhere. That is the
-// ordinary shape of a multi-commit ship — add a module, rename it during the fix cycle.
-//
-// A forward rename map could recover those cases, but it is new machinery in the one
-// mechanism whose entire job is not to overclaim, and every piece of machinery added here
-// so far has found a fresh way to lie. Skipping the range and SAYING so cannot produce a
-// false claim. The annotation is advisory; its correctness is not.
-//
-// The oracle's file set is computed here rather than reusing the review's own changed-file
-// list, so the user-visible "Changed Files" section keeps rename detection and only this
-// comparison uses the no-renames view.
-//
-// Returns { log, annotated }. `annotated: false` means the marks were not computed, which
-// the caller MUST disclose — an unmarked commit would otherwise read as "checked and
-// present" when nothing was checked.
-function annotateNetEffect(cwd, logOutput, diffArgs, logArgs, commitCount) {
-  if (!logOutput || commitCount > MAX_ANNOTATED_RANGE_COMMITS) {
-    return { log: logOutput, annotated: false };
-  }
-  const netProbe = git(cwd, ["diff", "--name-only", "--no-renames", ...diffArgs]);
-  if (netProbe.status !== 0) {
-    return { log: logOutput, annotated: false }; // oracle unavailable; say so, do not guess
-  }
-  // Per-commit rename detection sees renames of files born inside the range, which the
-  // range-level --no-renames view cannot. Any rename at all disqualifies the whole range.
-  const renameProbe = git(cwd, ["log", "--no-color", "--name-status", "-M", "--format=", ...logArgs]);
-  if (renameProbe.status !== 0 || /^R\d*\t/m.test(renameProbe.stdout)) {
-    return { log: logOutput, annotated: false };
-  }
-  const netFiles = new Set(netProbe.stdout.trim().split("\n").filter(Boolean));
-
-  // A probe that fails for even one commit means the marks are incomplete. Returning
-  // `annotated: true` then would claim every unmarked commit was checked, so any failure
-  // downgrades the whole range to the "not computed" disclosure.
-  let probeFailed = false;
-
-  const log = logOutput
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const sha = line.split(/\s/, 1)[0];
-      if (!sha) {
-        probeFailed = true;
-        return line;
-      }
-      // Parent count is read FIRST, because `git show` on a merge is not a usable
-      // contribution oracle at all. It renders the dense-combined (--cc) view, which
-      // lists only files differing from EVERY parent — so a clean merge yields an empty
-      // list and a conflict-resolved merge yields a small, partial one. Gating on the
-      // empty list alone let a merge with a manual resolution fall through and be branded
-      // as contributing nothing while it was the sole reason a file was in the diff.
-      // A merge is never annotated: the evidence does not exist either way.
-      let parents;
-      try {
-        parents = readCommitParents(cwd, sha);
-      } catch {
-        probeFailed = true;
-        return line;
-      }
-      if (parents.length > 1) {
-        return line; // merges are deliberately unannotatable, not a probe failure
-      }
-      const touched = git(cwd, ["show", "--pretty=format:", "--name-only", "--no-renames", sha, "--"]);
-      if (touched.status !== 0) {
-        probeFailed = true;
-        return line;
-      }
-      const files = touched.stdout.trim().split("\n").filter(Boolean);
-      if (files.length && files.some((file) => netFiles.has(file))) {
-        return line;
-      }
-      // Describes exactly what was checked — file paths — not what was inferred. A note
-      // whose job is to prevent overclaiming must not itself overclaim.
-      return `${line}  [no file this commit touched appears in the combined diff below]`;
-    })
-    .join("\n");
-
-  return { log, annotated: !probeFailed };
-}
+// The mark was advisory; its correctness was not. An unconditional caveat plus a concrete
+// escape hatch (`git show <sha>`) gives the reviewer everything the mark would have, cannot
+// be wrong, and costs nothing — the mark also spawned one `git show` per commit on a path
+// that runs twice per review.
 
 function collectCommitRangeContext(cwd, range, options = {}) {
   const includeDiff = options.includeDiff !== false;
@@ -756,24 +671,23 @@ function collectCommitRangeContext(cwd, range, options = {}) {
   const diffArgs = diffRevisionArgs(range.diffRevisions);
   const logArgs = [...range.logRevisions, "--"];
   const changedFiles = gitChecked(cwd, ["diff", "--name-only", ...diffArgs]).stdout.trim().split("\n").filter(Boolean);
-  // `--no-color` because a user with color.ui=always turns every sha into an ANSI-wrapped
-  // token: the annotation's per-commit lookups then all fail, every mark silently
-  // disappears, and escape codes leak into the prompt.
-  const rawLog = gitChecked(cwd, ["log", "--no-color", "--oneline", "--decorate", ...logArgs]).stdout.trim();
-  const commitCount = rawLog ? rawLog.split("\n").filter(Boolean).length : 0;
-  const { log: logOutput, annotated } = annotateNetEffect(cwd, rawLog, diffArgs, logArgs, commitCount);
+  // `--no-color` so a user with color.ui=always cannot leak ANSI escapes into the prompt.
+  const logOutput = gitChecked(cwd, ["log", "--no-color", "--oneline", "--decorate", ...logArgs]).stdout.trim();
+  const commitCount = logOutput ? logOutput.split("\n").filter(Boolean).length : 0;
   const commitMessages = gitChecked(cwd, ["log", "--no-color", "--format=%h %B%n---", ...logArgs]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffArgs]).stdout.trim();
-  const target = includeDiff ? "the combined diff below" : "the combined diff (not inlined here)";
+  const target = includeDiff ? "the combined diff below" : "the combined diff, which is not inlined here";
+  // Unconditionally true, and true for every repository shape — no oracle to be wrong.
   const netEffectNote = [
     `(${range.reviewCommand}.`,
-    `That diff is the NET effect of all ${commitCount} commit(s), not a replay of each one:`,
-    "work introduced and then reverted within this range is correctly absent from it.",
-    annotated
-      ? `An annotated commit is one where no file it touched appears in ${target}; that check compares FILE PATHS only, so a commit whose changes were only PARTIALLY undone later is NOT annotated — its file still appears while some of its hunks do not. Merge commits are never annotated, because git does not report a usable file list for them.`
-      : `Per-commit contribution marks were NOT computed for this range (more than ${MAX_ANNOTATED_RANGE_COMMITS} commits, a file renamed within the range, or the check could not run): the absence of a mark here means nothing was checked, not that nothing was undone.`,
-    "Do not treat the commit list as proof that every listed commit's changes are present.",
-    "If a commit matters to a finding, check it directly with `git show <sha>`.)"
+    `That diff is the NET effect of all ${commitCount} commit(s), not a replay of each one.`,
+    `A listed commit's changes are therefore NOT guaranteed to appear in ${target}:`,
+    "work introduced and later reverted within the range is absent, work superseded by a",
+    "later commit shows only in its final form, and a file renamed or moved within the range",
+    "appears only under its final path. This commit list is NOT evidence that any particular",
+    "commit's changes were reviewed. If a commit matters to a finding — or if you are about",
+    "to clear one — read it directly with `git show <sha>` rather than inferring it from the",
+    "combined diff.)"
   ].join(" ");
 
   return {
