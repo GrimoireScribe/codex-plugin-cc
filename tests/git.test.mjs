@@ -91,6 +91,10 @@ test("every revision-taking git diff routes through the -- / --no-relative guard
 
   // Nothing may emit color into the prompt: every git verb that renders diff or log text
   // must disable it explicitly, since color.ui=always overrides the not-a-tty default.
+  // `git status` takes no --no-color flag, so it is pinned separately at the config level.
+  assert.match(source.replace(/\s*\n\s*/g, " "), /"-c", "color\.status=false", "status"/);
+  assert.doesNotMatch(source, /\[\s*"status"/, "git status must disable color via -c color.status=false");
+
   const colorless = [];
   for (const match of source.replace(/\s*\n\s*/g, " ").match(/\[\s*"(diff|log|show)"[^\]]*\]/g) ?? []) {
     const call = match.replace(/\s+/g, " ");
@@ -628,6 +632,39 @@ test("a renamed file does not make the commit that changed it look uncovered", (
   assert.match(context.content, /AUTH_BYPASS/);
   // So nothing in this range may be annotated as contributing nothing.
   assert.doesNotMatch(context.content, /no file this commit touched appears/);
+});
+
+test("a file created AND renamed inside the range does not produce a false annotation", () => {
+  // The harder rename variant. `--no-renames` only restores the old path when the file
+  // existed at the range BASE (the rename decomposes into delete-old + add-new). A file
+  // born inside the range has no pre-image, so the net diff is just "add new-path" and
+  // the old path appears nowhere — the commit that created it would be branded while its
+  // code sits in the diff under the new name. "Add a module, rename it during the fix
+  // cycle" is the ordinary shape of the multi-commit ships this feature is built for.
+  const cwd = makeTempDir();
+  initGitRepo(cwd);
+  fs.writeFileSync(path.join(cwd, "seed.js"), "export const seed = 0;\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "seed"], { cwd });
+  const base = run("git", ["rev-parse", "HEAD"], { cwd }).stdout.trim();
+
+  fs.writeFileSync(path.join(cwd, "auth.js"), "export const bypass = 'BORN_IN_RANGE_MARKER';\n");
+  run("git", ["add", "-A"], { cwd });
+  run("git", ["commit", "-m", "addauth"], { cwd });
+
+  run("git", ["mv", "auth.js", "authentication.js"], { cwd });
+  run("git", ["commit", "-m", "rename"], { cwd });
+
+  const target = resolveReviewTarget(cwd, { commit: `${base}..HEAD` });
+  const context = collectReviewContext(cwd, target, { maxInlineFiles: 10 });
+
+  // The code IS in the combined diff, under the new name.
+  assert.match(context.content, /BORN_IN_RANGE_MARKER/);
+  // So no commit may be branded as contributing nothing...
+  assert.doesNotMatch(context.content, /no file this commit touched appears/);
+  // ...and the absence of marks must be disclosed rather than read as a clean result.
+  assert.match(context.content, /marks were NOT computed/);
+  assert.match(context.content, /renamed within the range/);
 });
 
 test("the net-effect note discloses that marks were computed", () => {

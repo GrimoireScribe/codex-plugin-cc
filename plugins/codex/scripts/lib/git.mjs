@@ -532,7 +532,15 @@ function formatUntrackedFile(cwd, relativePath) {
 function collectWorkingTreeContext(cwd, state, options = {}) {
   const includeDiff = options.includeDiff !== false;
   const includeUntrackedContents = options.includeUntrackedContents !== false;
-  const status = gitChecked(cwd, ["status", "--short", "--untracked-files=all"]).stdout.trim();
+  // `git status` has no --no-color flag, so color is disabled at the config level. Without
+  // this, color.ui=always injects ANSI escapes into the status text embedded in the prompt.
+  const status = gitChecked(cwd, [
+    "-c",
+    "color.status=false",
+    "status",
+    "--short",
+    "--untracked-files=all"
+  ]).stdout.trim();
   const changedFiles = listUniqueFiles(state.staged, state.unstaged, state.untracked);
 
   let parts;
@@ -648,24 +656,35 @@ const MAX_ANNOTATED_RANGE_COMMITS = 100;
 // the diff. Silently listing it invites the reviewer to believe it reviewed that commit.
 // Annotate those commits explicitly instead.
 //
-// Both probes MUST run with --no-renames. Rename detection is on by default and the two
-// sides of this comparison see different paths: the net diff reports only a rename's
-// DESTINATION path, while `git show` on an earlier commit reports the path as it existed
-// THEN. Without --no-renames, "commit X edits auth.js" + "commit Y renames auth.js to
-// authentication.js" makes X's file set disjoint from the net set, and X is branded as
-// contributing nothing while its change sits in the diff under the new name. That is
-// strictly worse than the omission this annotation exists to fix: the original bug left
-// the reviewer neutral, the false positive makes an affirmative claim about the exact
-// commit that matters and steers the reviewer away from it. Renaming a file in the same
-// range that changes it is ordinary work, not a corner case.
+// Renames defeat this oracle, and the whole range is skipped when one is present.
+//
+// The two sides see different paths: the net diff reports a rename's DESTINATION, while
+// `git show` on an earlier commit reports the path as it existed THEN. So "commit X adds
+// auth.js" + "commit Y renames it to authentication.js" makes X's file set disjoint from
+// the net set, and X is branded as contributing nothing while its change sits in the diff
+// under the new name — an affirmative false claim steering the reviewer away from the one
+// commit that matters, which is strictly worse than the omission this annotation exists
+// to fix.
+//
+// `--no-renames` on both probes handles only the case where the file existed at the range
+// BASE (the rename decomposes into delete-old + add-new, putting the old path back in the
+// net diff). It does NOT help when the file is both CREATED and renamed inside the range:
+// the net diff is then just "add new-path", and the old path appears nowhere. That is the
+// ordinary shape of a multi-commit ship — add a module, rename it during the fix cycle.
+//
+// A forward rename map could recover those cases, but it is new machinery in the one
+// mechanism whose entire job is not to overclaim, and every piece of machinery added here
+// so far has found a fresh way to lie. Skipping the range and SAYING so cannot produce a
+// false claim. The annotation is advisory; its correctness is not.
 //
 // The oracle's file set is computed here rather than reusing the review's own changed-file
 // list, so the user-visible "Changed Files" section keeps rename detection and only this
 // comparison uses the no-renames view.
-// Returns { log, annotated }. `annotated: false` means the marks could not be computed at
-// all, which the caller MUST disclose — an unmarked commit would otherwise read as
-// "checked and present" when nothing was checked.
-function annotateNetEffect(cwd, logOutput, diffArgs, commitCount) {
+//
+// Returns { log, annotated }. `annotated: false` means the marks were not computed, which
+// the caller MUST disclose — an unmarked commit would otherwise read as "checked and
+// present" when nothing was checked.
+function annotateNetEffect(cwd, logOutput, diffArgs, logArgs, commitCount) {
   if (!logOutput || commitCount > MAX_ANNOTATED_RANGE_COMMITS) {
     return { log: logOutput, annotated: false };
   }
@@ -673,7 +692,18 @@ function annotateNetEffect(cwd, logOutput, diffArgs, commitCount) {
   if (netProbe.status !== 0) {
     return { log: logOutput, annotated: false }; // oracle unavailable; say so, do not guess
   }
+  // Per-commit rename detection sees renames of files born inside the range, which the
+  // range-level --no-renames view cannot. Any rename at all disqualifies the whole range.
+  const renameProbe = git(cwd, ["log", "--no-color", "--name-status", "-M", "--format=", ...logArgs]);
+  if (renameProbe.status !== 0 || /^R\d*\t/m.test(renameProbe.stdout)) {
+    return { log: logOutput, annotated: false };
+  }
   const netFiles = new Set(netProbe.stdout.trim().split("\n").filter(Boolean));
+
+  // A probe that fails for even one commit means the marks are incomplete. Returning
+  // `annotated: true` then would claim every unmarked commit was checked, so any failure
+  // downgrades the whole range to the "not computed" disclosure.
+  let probeFailed = false;
 
   const log = logOutput
     .split("\n")
@@ -681,6 +711,7 @@ function annotateNetEffect(cwd, logOutput, diffArgs, commitCount) {
     .map((line) => {
       const sha = line.split(/\s/, 1)[0];
       if (!sha) {
+        probeFailed = true;
         return line;
       }
       // Parent count is read FIRST, because `git show` on a merge is not a usable
@@ -694,13 +725,15 @@ function annotateNetEffect(cwd, logOutput, diffArgs, commitCount) {
       try {
         parents = readCommitParents(cwd, sha);
       } catch {
+        probeFailed = true;
         return line;
       }
       if (parents.length > 1) {
-        return line;
+        return line; // merges are deliberately unannotatable, not a probe failure
       }
       const touched = git(cwd, ["show", "--pretty=format:", "--name-only", "--no-renames", sha, "--"]);
       if (touched.status !== 0) {
+        probeFailed = true;
         return line;
       }
       const files = touched.stdout.trim().split("\n").filter(Boolean);
@@ -713,7 +746,7 @@ function annotateNetEffect(cwd, logOutput, diffArgs, commitCount) {
     })
     .join("\n");
 
-  return { log, annotated: true };
+  return { log, annotated: !probeFailed };
 }
 
 function collectCommitRangeContext(cwd, range, options = {}) {
@@ -728,7 +761,7 @@ function collectCommitRangeContext(cwd, range, options = {}) {
   // disappears, and escape codes leak into the prompt.
   const rawLog = gitChecked(cwd, ["log", "--no-color", "--oneline", "--decorate", ...logArgs]).stdout.trim();
   const commitCount = rawLog ? rawLog.split("\n").filter(Boolean).length : 0;
-  const { log: logOutput, annotated } = annotateNetEffect(cwd, rawLog, diffArgs, commitCount);
+  const { log: logOutput, annotated } = annotateNetEffect(cwd, rawLog, diffArgs, logArgs, commitCount);
   const commitMessages = gitChecked(cwd, ["log", "--no-color", "--format=%h %B%n---", ...logArgs]).stdout.trim();
   const diffStat = gitChecked(cwd, ["diff", "--stat", ...diffArgs]).stdout.trim();
   const target = includeDiff ? "the combined diff below" : "the combined diff (not inlined here)";
@@ -738,7 +771,7 @@ function collectCommitRangeContext(cwd, range, options = {}) {
     "work introduced and then reverted within this range is correctly absent from it.",
     annotated
       ? `An annotated commit is one where no file it touched appears in ${target}; that check compares FILE PATHS only, so a commit whose changes were only PARTIALLY undone later is NOT annotated — its file still appears while some of its hunks do not. Merge commits are never annotated, because git does not report a usable file list for them.`
-      : "Per-commit contribution marks were NOT computed for this range (too many commits, or the check could not run): the absence of a mark here means nothing was checked, not that nothing was undone.",
+      : `Per-commit contribution marks were NOT computed for this range (more than ${MAX_ANNOTATED_RANGE_COMMITS} commits, a file renamed within the range, or the check could not run): the absence of a mark here means nothing was checked, not that nothing was undone.`,
     "Do not treat the commit list as proof that every listed commit's changes are present.",
     "If a commit matters to a finding, check it directly with `git show <sha>`.)"
   ].join(" ");
