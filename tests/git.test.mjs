@@ -340,6 +340,24 @@ test("collectReviewContext keeps untracked file content in lightweight working t
 
 // --- Commit range review support -------------------------------------------------
 
+// Asserts that no commit in the "Commits In Range" list carries a per-commit coverage
+// claim. Five successive attempts at such a mark each shipped a new way to brand the one
+// commit that mattered as contributing nothing (renames of files present at the base, of
+// files born in the range, performed by a merge, below the -M threshold, and rename-limit
+// overflow), so the design now makes NO per-commit claim at all.
+//
+// This checks the STRUCTURE — a trailing bracketed suffix on a log line — rather than the
+// text of any one past mark, so it fails if a mark in any wording is reintroduced. `git log
+// --decorate` uses parentheses, never brackets, so the shape is unambiguous.
+function assertNoPerCommitCoverageClaim(content) {
+  const section = content.split("## Commit Messages")[0] ?? "";
+  const marked = section
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => /^[0-9a-f]{7,} .*\[[^\]]+\]$/.test(line));
+  assert.deepEqual(marked, [], "no commit may carry a per-commit coverage claim");
+}
+
 // NOTE: helpers.run spawns with shell: true on Windows, so commit messages must stay
 // single-word — a multi-word -m argument is concatenated unquoted and git reads the
 // trailing words as pathspecs, silently producing no commit.
@@ -602,7 +620,7 @@ test("commit range never marks a commit as absent, and discloses the net-effect 
   // The risky commit's content is genuinely absent from the net diff...
   assert.doesNotMatch(context.content, /BAD_AUTH_BYPASS/);
   // ...so the commit list must say so rather than implying it was reviewed.
-  assert.doesNotMatch(context.content, /\[no file this commit/);
+  assertNoPerCommitCoverageClaim(context.content);
   assert.match(context.content, /NET effect/);
 });
 
@@ -631,7 +649,7 @@ test("a rename in the range produces no per-commit coverage claim", () => {
   // The bypass really is in the combined diff, under the new name.
   assert.match(context.content, /AUTH_BYPASS/);
   // So nothing in this range may be annotated as contributing nothing.
-  assert.doesNotMatch(context.content, /\[no file this commit/);
+  assertNoPerCommitCoverageClaim(context.content);
 });
 
 test("a file created AND renamed inside the range produces no false coverage claim", () => {
@@ -661,7 +679,7 @@ test("a file created AND renamed inside the range produces no false coverage cla
   // The code IS in the combined diff, under the new name.
   assert.match(context.content, /BORN_IN_RANGE_MARKER/);
   // So no commit may be branded as contributing nothing...
-  assert.doesNotMatch(context.content, /\[no file this commit/);
+  assertNoPerCommitCoverageClaim(context.content);
   // ...and the absence of marks must be disclosed rather than read as a clean result.
   assert.match(context.content, /NOT guaranteed to appear/);
 });
@@ -707,7 +725,7 @@ test("a merge commit carries no per-commit coverage claim", () => {
   const context = collectReviewContext(cwd, target, { maxInlineFiles: 5 });
 
   assert.match(context.content, /SIDE_MARKER/);
-  assert.doesNotMatch(context.content, /\[no file this commit/);
+  assertNoPerCommitCoverageClaim(context.content);
 });
 
 test("a conflict-resolved merge carries no per-commit coverage claim", () => {
@@ -752,13 +770,13 @@ test("a conflict-resolved merge carries no per-commit coverage claim", () => {
   // The merge is the only reason the side work is in the combined diff...
   assert.match(context.content, /MERGE_CARRIED_MARKER/);
   assert.match(context.content, /NOT guaranteed to appear/);
-  // ...so the MERGE line specifically must carry no mark. (The later "restore" commit is
-  // legitimately annotated — its own change really is absent from the net diff.)
+  // ...and no commit, the merge included, carries a per-commit coverage claim.
   const mergeLine = context.content
     .split("\n")
     .find((line) => line.startsWith(mergeSha) || line.includes(` ${mergeSha} `));
   assert.ok(mergeLine, `expected the merge commit ${mergeSha} in the commit list`);
-  assert.doesNotMatch(mergeLine, /\[no file this commit/);
+  assert.doesNotMatch(mergeLine, /\[[^\]]+\]$/);
+  assertNoPerCommitCoverageClaim(context.content);
 });
 
 test("the mainline root still supports ROOT^..HEAD in a repository with a second root", () => {
@@ -793,8 +811,8 @@ test("the mainline root still supports ROOT^..HEAD in a repository with a second
 });
 
 test("no ANSI escapes leak into the prompt under color.ui=always", () => {
-  // Without --no-color the sha token becomes an ANSI-wrapped string, every per-commit
-  // lookup fails, and the marks silently vanish while the note still claims they exist.
+  // color.ui=always overrides git's not-a-tty default, so without --no-color the log,
+  // diff, and status text all carry ANSI escape sequences straight into the prompt.
   const cwd = makeTempDir();
   initGitRepo(cwd);
   run("git", ["config", "color.ui", "always"], { cwd });
@@ -813,7 +831,7 @@ test("no ANSI escapes leak into the prompt under color.ui=always", () => {
   const target = resolveReviewTarget(cwd, { commit: `${risky}^..HEAD` });
   const context = collectReviewContext(cwd, target);
 
-  assert.doesNotMatch(context.content, /\[no file this commit/);
+  assertNoPerCommitCoverageClaim(context.content);
   // And no raw escape codes leak into the prompt.
   assert.doesNotMatch(context.content, /\[/);
 });
