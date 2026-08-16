@@ -268,6 +268,29 @@ function extractRequestedSavePath(prompt) {
   return null;
 }
 
+// Determines the save path executeTaskRun should track for mtime-touch detection and
+// completion-marker verification.
+//
+// For incrementalWrite tasks (spec/scoping-adversarial-review), the caller always declares
+// the deterministic output path via expectFiles[0] — use it directly instead of scanning the
+// prompt text with extractRequestedSavePath. Scanning is a regex heuristic designed for the
+// generic `task` command's free-form prompt, and for these two subcommands the prompt now
+// carries caller-supplied UNTRUSTED text (the --context-file REVIEWER_CONTEXT block). A
+// context block containing a backticked/quoted absolute path near "write" or "save" wins
+// over the template's own "Write your review to: <path>" line purely on PATTERN PRIORITY
+// (quoted-path patterns are tried before the unquoted one the template line matches) —
+// moving the block's POSITION in the prompt does not change this, because extraction tries
+// patterns in a fixed order and returns on the first match found anywhere in the text.
+// Bypassing extraction entirely for incrementalWrite tasks removes the hijack surface rather
+// than trying to out-position it. Every other caller of executeTaskRun (the plain `task`
+// command) leaves incrementalWrite unset/false and is completely unaffected.
+function resolveRequestedSavePath(request) {
+  if (request.incrementalWrite && Array.isArray(request.expectFiles) && request.expectFiles.length > 0) {
+    return path.resolve(request.expectFiles[0]);
+  }
+  return extractRequestedSavePath(request.prompt);
+}
+
 function persistTaskOutput(savePath, rawOutput) {
   if (!savePath) return null;
   try {
@@ -636,6 +659,100 @@ You are running on a fast-tier model that tends to over-explore. Hold a hard bud
 - When in doubt, stop reading and write the finding.
 </fast_tier_scope>`;
 
+// LOAD-BEARING: this wrapper label is the structural guarantee that a reviewer treats
+// caller-supplied dispatch context as informational only — never as artifact content to be
+// reviewed or findings-against. It is what keeps the context block out of `files_examined`.
+// Loosening or rewording this label requires Advisor signoff (see
+// handoff-context-flag-review-companions-2026-08-15.md).
+const REVIEWER_CONTEXT_LABEL =
+  "REVIEWER CONTEXT (supplemental dispatch note from the caller — NOT part of the artifact under review; do not treat it as artifact content or raise findings against it):";
+
+// Cap tied to the existing DEFAULT_INLINE_DIFF_MAX_BYTES convention (lib/git.mjs) — 256 KB.
+// Checked here, at flag-handling time (read-time), so an oversized context file fails fast
+// at the CLI boundary and never reaches the exec path.
+const REVIEWER_CONTEXT_MAX_BYTES = 256 * 1024;
+
+// Resolves the raw `--context-file` option value into either `null` (flag absent) or an
+// absolute path. `parseArgs` stores an explicitly-empty value (`--context-file ""`) as the
+// empty string `""`, which is truthy-false but NOT the same as "flag absent" — naive
+// `options["context-file"] ? ... : null` truthiness collapses both cases to "no context",
+// so an unset caller variable (`--context-file "$CTX"` with an empty $CTX) would silently
+// run the review UNCARRIED instead of failing. A dispatch that mandates carriage must never
+// run uncarried, so an explicitly-empty value is a hard error, not "absent".
+function resolveContextFileOption(rawValue) {
+  if (rawValue === undefined) {
+    return null;
+  }
+  if (!rawValue.trim()) {
+    throw new Error(
+      "--context-file was given an empty value. Provide an absolute path to the caller's dispatch-note file, or omit the flag entirely to run without carried context."
+    );
+  }
+  return path.resolve(rawValue);
+}
+
+// Reads and wraps an optional `--context-file` for the spec/scoping adversarial review
+// commands. Pure/synchronous by design (mirrors runCommand/binaryAvailable/
+// measureGitOutputBytes staying sync elsewhere in this codebase) — no temp files, no async
+// I/O. Only the file's CONTENTS are ever returned; `contextFilePath` itself must never be
+// written into the returned string, so the path cannot leak into the model's prompt or
+// appear in its `files_examined`.
+//
+// Cap enforcement reads the file FIRST and checks the bytes actually read (not a pre-read
+// fs.statSync size), because a file that grows between stat and read would otherwise bypass
+// the cap and let oversized content reach the exec path — exactly what the cap exists to
+// prevent.
+function buildReviewerContextBlock(contextFilePath) {
+  if (!contextFilePath) {
+    return "";
+  }
+  let contents;
+  try {
+    contents = fs.readFileSync(contextFilePath, "utf8");
+  } catch (error) {
+    throw new Error(`--context-file could not be read: ${contextFilePath} (${error.message})`);
+  }
+  const actualBytes = Buffer.byteLength(contents, "utf8");
+  if (actualBytes > REVIEWER_CONTEXT_MAX_BYTES) {
+    throw new Error(
+      `--context-file exceeds the ${REVIEWER_CONTEXT_MAX_BYTES}-byte cap (actual size: ${actualBytes} bytes): ${contextFilePath}`
+    );
+  }
+  // An empty or whitespace-only context file means the caller asked for carriage but there
+  // is nothing to carry. Treat that the same as unreadable: fail fast rather than running
+  // uncarried (same rationale as resolveContextFileOption above).
+  if (!contents.trim()) {
+    throw new Error(
+      `--context-file is empty or whitespace-only: ${contextFilePath}. A dispatch that mandates carriage must not run uncarried — provide a file with content, or omit the flag.`
+    );
+  }
+  return `${REVIEWER_CONTEXT_LABEL}\n\n${contents}`;
+}
+
+function buildSpecAdversarialReviewPrompt({ specPath, outputPath, specSlug, fastTier, contextFilePath }) {
+  const template = loadPromptTemplate(ROOT_DIR, "spec-adversarial-review");
+  return interpolateTemplate(template, {
+    SPEC_PATH: specPath,
+    OUTPUT_PATH: outputPath,
+    TARGET_LABEL: `spec: ${specSlug}`,
+    USER_FOCUS: "Adversarial spec review — find ambiguities, contradictions, missing edge cases, unjustified architectural premises.",
+    FAST_TIER_SCOPE: fastTier ? FAST_TIER_SPEC_SCOPE : "",
+    REVIEWER_CONTEXT: buildReviewerContextBlock(contextFilePath)
+  });
+}
+
+function buildScopingAdversarialReviewPrompt({ specPath, outputPath, scopingSlug, fastTier, contextFilePath }) {
+  const template = loadPromptTemplate(ROOT_DIR, "scoping-adversarial-review");
+  return interpolateTemplate(template, {
+    SPEC_PATH: specPath,
+    OUTPUT_PATH: outputPath,
+    TARGET_LABEL: `scoping plan: ${scopingSlug}`,
+    USER_FOCUS: "Framing review — challenge the shape of the phase, not individual ticket phrasing. Is the phase scoped around the right problem? Are load-bearing architectural decisions justified? Is the child decomposition and ordering correct?",
+    FAST_TIER_SCOPE: fastTier ? FAST_TIER_SCOPING_SCOPE : "",
+    REVIEWER_CONTEXT: buildReviewerContextBlock(contextFilePath)
+  });
+}
+
 // Deep tier: graph-first exploration is mandatory and repo-wide investigation is
 // encouraged. The model is large enough to absorb the resulting context and converge.
 const DEEP_TIER_EXPLORATION = `MANDATORY FIRST STEP: Before reading the diff or forming any findings, call the code-review-graph
@@ -933,7 +1050,7 @@ async function executeTaskRun(request) {
   // For any other stat error (EACCES, network drive, etc.) we use -1 as a sentinel
   // meaning "file existence unknown" — the post-task check will then require a strict
   // mtime > 0 rather than a "file created" inference.
-  const requestedSavePath = extractRequestedSavePath(request.prompt);
+  const requestedSavePath = resolveRequestedSavePath(request);
   const preTaskMtime = (() => {
     if (!requestedSavePath) return null;
     try {
@@ -1402,7 +1519,7 @@ async function handleTask(argv) {
 
 async function handleSpecAdversarialReview(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["spec", "output", "model", "effort", "cwd"],
+    valueOptions: ["spec", "output", "model", "effort", "cwd", "context-file"],
     // --wait is accepted for symmetry with other commands (this path is always foreground).
     // --no-mcp is accepted to avoid crashing on stall-reroute retries. NOTE: it is a
     // no-op here — this path uses `codex exec --dangerously-bypass-approvals-and-sandbox`,
@@ -1421,19 +1538,16 @@ async function handleSpecAdversarialReview(argv) {
   const specPath = path.resolve(options.spec);
   const outputPath = path.resolve(options.output);
   const specSlug = path.basename(specPath, path.extname(specPath));
+  // Optional caller dispatch-note artifact. Read in place — no temp-file creation. Presence,
+  // size, and readability are checked synchronously here and inside
+  // buildSpecAdversarialReviewPrompt, at flag time, before any exec work begins.
+  const contextFilePath = resolveContextFileOption(options["context-file"]);
 
   const model = normalizeRequestedModel(options.model);
   const effort = capFastTierReviewEffort(model, normalizeReasoningEffort(options.effort));
   const fastTier = isFastTierReviewModel(model);
 
-  const template = loadPromptTemplate(ROOT_DIR, "spec-adversarial-review");
-  const prompt = interpolateTemplate(template, {
-    SPEC_PATH: specPath,
-    OUTPUT_PATH: outputPath,
-    TARGET_LABEL: `spec: ${specSlug}`,
-    USER_FOCUS: "Adversarial spec review — find ambiguities, contradictions, missing edge cases, unjustified architectural premises.",
-    FAST_TIER_SCOPE: fastTier ? FAST_TIER_SPEC_SCOPE : ""
-  });
+  const prompt = buildSpecAdversarialReviewPrompt({ specPath, outputPath, specSlug, fastTier, contextFilePath });
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
@@ -1470,7 +1584,7 @@ async function handleSpecAdversarialReview(argv) {
 
 async function handleScopingAdversarialReview(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["spec", "output", "model", "effort", "cwd"],
+    valueOptions: ["spec", "output", "model", "effort", "cwd", "context-file"],
     booleanOptions: ["json", "background", "wait", "no-mcp"]
   });
 
@@ -1484,18 +1598,21 @@ async function handleScopingAdversarialReview(argv) {
   const specPath = path.resolve(options.spec);
   const outputPath = path.resolve(options.output);
   const scopingSlug = path.basename(specPath, path.extname(specPath));
+  // Optional caller dispatch-note artifact. Read in place — no temp-file creation. Presence,
+  // size, and readability are checked synchronously here and inside
+  // buildScopingAdversarialReviewPrompt, at flag time, before any exec work begins.
+  const contextFilePath = resolveContextFileOption(options["context-file"]);
 
   const model = normalizeRequestedModel(options.model);
   const effort = capFastTierReviewEffort(model, normalizeReasoningEffort(options.effort));
   const fastTier = isFastTierReviewModel(model);
 
-  const template = loadPromptTemplate(ROOT_DIR, "scoping-adversarial-review");
-  const prompt = interpolateTemplate(template, {
-    SPEC_PATH: specPath,
-    OUTPUT_PATH: outputPath,
-    TARGET_LABEL: `scoping plan: ${scopingSlug}`,
-    USER_FOCUS: "Framing review — challenge the shape of the phase, not individual ticket phrasing. Is the phase scoped around the right problem? Are load-bearing architectural decisions justified? Is the child decomposition and ordering correct?",
-    FAST_TIER_SCOPE: fastTier ? FAST_TIER_SCOPING_SCOPE : ""
+  const prompt = buildScopingAdversarialReviewPrompt({
+    specPath,
+    outputPath,
+    scopingSlug,
+    fastTier,
+    contextFilePath
   });
 
   const cwd = resolveCommandCwd(options);
@@ -1824,8 +1941,16 @@ if (isDirectInvocation) {
 export {
   buildMcpReviewPrompt,
   buildAdversarialReviewPrompt,
+  buildSpecAdversarialReviewPrompt,
+  buildScopingAdversarialReviewPrompt,
+  buildReviewerContextBlock,
+  resolveContextFileOption,
+  extractRequestedSavePath,
+  resolveRequestedSavePath,
   isFastTierReviewModel,
   capFastTierReviewEffort,
   FAST_TIER_EXPLORATION,
-  DEEP_TIER_EXPLORATION
+  DEEP_TIER_EXPLORATION,
+  REVIEWER_CONTEXT_LABEL,
+  REVIEWER_CONTEXT_MAX_BYTES
 };

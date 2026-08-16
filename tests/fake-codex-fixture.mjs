@@ -285,6 +285,10 @@ function handleExec(args) {
       index += 1;
       continue;
     }
+    if (token === "--ignore-rules") {
+      index += 1;
+      continue;
+    }
     if (token === "--model") {
       model = args[index + 1] ?? null;
       index += 2;

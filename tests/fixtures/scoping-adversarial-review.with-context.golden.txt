@@ -11,14 +11,19 @@ Review security-related plans with the same rigor and the same finding bar as an
 </review_context_and_authorization>
 
 <task>
-Review the scoping plan at: {{SPEC_PATH}}
+Review the scoping plan at: /abs/plan.md
 
-Target: {{TARGET_LABEL}}
-User focus: {{USER_FOCUS}}
+Target: scoping plan: plan
+User focus: Framing review — challenge the shape of the phase, not individual ticket phrasing. Is the phase scoped around the right problem? Are load-bearing architectural decisions justified? Is the child decomposition and ordering correct?
 
-{{REVIEWER_CONTEXT}}
+REVIEWER CONTEXT (supplemental dispatch note from the caller — NOT part of the artifact under review; do not treat it as artifact content or raise findings against it):
 
-Write your review to: {{OUTPUT_PATH}}
+Dispatch note from PM:
+Focus this review on the new --context-file wiring.
+Canary: ZX9-CTX-NATIVE-CANARY
+
+
+Write your review to: /abs/out.md
 </task>
 
 <operating_stance>
@@ -44,31 +49,31 @@ Do NOT accumulate the full review and write it at the end.
 Write each section to disk immediately after completing it.
 If you run out of context mid-review, the sections already on disk are preserved.
 
-The output file path is: {{OUTPUT_PATH}}
+The output file path is: /abs/out.md
 
 Write sections in this exact order, using these exact headings. Each section is a separate apply_patch call.
 Do not skip a section — write it as empty with a note if there is nothing to report.
 
-Step 1 — Read the scoping plan at {{SPEC_PATH}} first. Do not begin writing until you have read it.
+Step 1 — Read the scoping plan at /abs/plan.md first. Do not begin writing until you have read it.
 
 Step 2 — Write Section 1: Framing Assessment
 Is the phase scoped around the right problem? Does the phase framing cohere — does the problem statement match the proposed solution shape? Is the scope too broad, too narrow, or miscalibrated? One to three paragraphs.
-Write this to {{OUTPUT_PATH}} NOW under the heading "## Framing Assessment" before proceeding to Section 2.
+Write this to /abs/out.md NOW under the heading "## Framing Assessment" before proceeding to Section 2.
 
 Step 3 — Write Section 2: Unjustified Load-Bearing Architectural Decisions
 List each architectural decision that the phase plan depends on but has not explicitly justified. Format: decision name → why it is load-bearing → what the unjustified assumption is → what would need to be true for it to hold.
 If none: write "No unjustified load-bearing architectural decisions found."
-Write this to {{OUTPUT_PATH}} NOW under the heading "## Unjustified Load-Bearing Architectural Decisions" before proceeding to Section 3.
+Write this to /abs/out.md NOW under the heading "## Unjustified Load-Bearing Architectural Decisions" before proceeding to Section 3.
 
 Step 4 — Write Section 3: Child Decomposition Correctness
 Are the proposed child tickets the right decomposition? Flag: wrong ticket cuts (too coarse, too fine, or encoding conflicting assumptions), missing tickets the phase clearly needs, tickets that should be merged, tickets that conflict or overlap. Be specific about which children and why.
 If the decomposition looks correct: say so directly.
-Write this to {{OUTPUT_PATH}} NOW under the heading "## Child Decomposition Correctness" before proceeding to Section 4.
+Write this to /abs/out.md NOW under the heading "## Child Decomposition Correctness" before proceeding to Section 4.
 
 Step 5 — Write Section 4: Ordering Correctness
 Is the proposed execution sequence correct given dependencies? Would any child block another under the proposed order? Are there hidden dependency edges not captured in the ordering? Flag specific pairs or sequences.
 If ordering looks correct: say so directly.
-Write this to {{OUTPUT_PATH}} NOW under the heading "## Ordering Correctness" before proceeding to Section 5.
+Write this to /abs/out.md NOW under the heading "## Ordering Correctness" before proceeding to Section 5.
 
 Step 6 — Write Section 5: Review Evidence
 This section is REQUIRED whether or not you logged findings, and it must be written BEFORE the verdict.
@@ -91,11 +96,11 @@ Write the heading "## Review Evidence" followed by a fenced ```json block contai
 
 Rules for this object:
 - `scope` is `provided-artifact-only` for a scoping review. Use `targeted-repository` only if you genuinely read repository files beyond the plan.
-- `files_examined` must include the scoping plan path at {{SPEC_PATH}} and is never empty.
+- `files_examined` must include the scoping plan path at /abs/plan.md and is never empty.
 - `checks_performed` must contain at least one entry, and each `evidence` item must be a specific observed fact. A tool name is NOT evidence. "Read the plan", "reviewed it", and "framing looks correct" are NOT evidence.
 - `tools_used: []` is valid and correct when you called no tools.
 - `limitations: []` is valid when there were none.
-Write this to {{OUTPUT_PATH}} NOW under the heading "## Review Evidence" before proceeding to Section 6.
+Write this to /abs/out.md NOW under the heading "## Review Evidence" before proceeding to Section 6.
 
 Step 7 — Write Section 6: Overall Verdict
 One paragraph synthesis of the strongest concern across all four sections. Then one line:
@@ -104,10 +109,10 @@ Criteria:
 - fail = the phase framing is wrong at a level that would cause the entire phase to build the wrong thing
 - findings-logged = material concerns exist but do not invalidate the phase shape
 - pass = no material concerns — the phase is scoped correctly
-Write this to {{OUTPUT_PATH}} NOW under the heading "## Overall Verdict".
+Write this to /abs/out.md NOW under the heading "## Overall Verdict".
 
 Step 8 — Write the completion marker
-As your absolute final act, append this exact line to {{OUTPUT_PATH}}:
+As your absolute final act, append this exact line to /abs/out.md:
 <!-- REVIEW COMPLETE -->
 
 This marker is how automated tooling distinguishes a complete review from a partial file written before context overflow. Do not omit it. Do not write it before the Overall Verdict section.
@@ -116,14 +121,14 @@ This marker is how automated tooling distinguishes a complete review from a part
 <grounding_rules>
 Be aggressive, but stay grounded.
 Every MATERIAL claim you make carries an evidentiary burden — that includes findings, their severity, factual statements about the plan, AND any claim that the phase framing is correct / coherent / complete / ready, or any pass verdict. Record your actual scope, files examined, checks performed, tools used, and limitations in the Review Evidence section. A clearance (pass / no material concerns) requires at least one concrete recorded check plus a specific observed fact supporting it. The phrases "reviewed", "verified against HEAD", and "framing looks correct" are NOT evidence. No-findings is a conclusion that still requires complete Review Evidence; it is not an appearance test. Concision is subordinate to evidentiary completeness. Do not fabricate scope, checks, or tool usage.
-Every finding must cite a specific section or passage of the scoping plan at {{SPEC_PATH}}.
+Every finding must cite a specific section or passage of the scoping plan at /abs/plan.md.
 Do not invent architectural decisions, child tickets, or dependencies not described in the plan.
 If a conclusion depends on an inference, state that explicitly and keep the confidence honest.
 This is framing review only — do NOT review code.
 Do not use image generation, vision, or drawing tools. This is a text-only review.
 </grounding_rules>
 
-{{FAST_TIER_SCOPE}}
+
 
 <calibration_rules>
 Prefer one strong finding per section over several weak ones.
@@ -136,7 +141,7 @@ Before writing the completion marker, verify:
 - Each section uses the exact heading specified (Framing Assessment, Unjustified Load-Bearing Architectural Decisions, Child Decomposition Correctness, Ordering Correctness, Review Evidence, Overall Verdict)
 - Each finding is tied to a specific passage in the scoping plan
 - The verdict matches the highest severity finding across all sections
-- The "## Review Evidence" section is on disk, is valid JSON, names {{SPEC_PATH}} in `files_examined`, and every `checks_performed` entry carries at least one specific observed fact rather than a restatement of the task or a bare tool name
-- All six sections are on disk at {{OUTPUT_PATH}}
+- The "## Review Evidence" section is on disk, is valid JSON, names /abs/plan.md in `files_examined`, and every `checks_performed` entry carries at least one specific observed fact rather than a restatement of the task or a bare tool name
+- All six sections are on disk at /abs/out.md
 Then write <!-- REVIEW COMPLETE -->.
 </final_check>

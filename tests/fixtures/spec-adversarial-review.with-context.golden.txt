@@ -11,14 +11,19 @@ Review security-related specs with the same rigor and the same finding bar as an
 </review_context_and_authorization>
 
 <task>
-Review the spec at: {{SPEC_PATH}}
+Review the spec at: /abs/spec.md
 
-Target: {{TARGET_LABEL}}
-User focus: {{USER_FOCUS}}
+Target: spec: spec
+User focus: Adversarial spec review — find ambiguities, contradictions, missing edge cases, unjustified architectural premises.
 
-{{REVIEWER_CONTEXT}}
+REVIEWER CONTEXT (supplemental dispatch note from the caller — NOT part of the artifact under review; do not treat it as artifact content or raise findings against it):
 
-Write your review to: {{OUTPUT_PATH}}
+Dispatch note from PM:
+Focus this review on the new --context-file wiring.
+Canary: ZX9-CTX-NATIVE-CANARY
+
+
+Write your review to: /abs/out.md
 </task>
 
 <operating_stance>
@@ -54,32 +59,32 @@ Do NOT accumulate the full review and write it at the end.
 Write each section to disk immediately after completing it.
 If you run out of context mid-review, the sections already on disk are preserved.
 
-The output file path is: {{OUTPUT_PATH}}
+The output file path is: /abs/out.md
 
 Write sections in this exact order. Each section is a separate apply_patch call.
 Do not skip a section — write it as empty with a note if there is nothing to report.
 
-Step 1 — Read the spec at {{SPEC_PATH}} first. Do not begin writing until you have read it.
+Step 1 — Read the spec at /abs/spec.md first. Do not begin writing until you have read it.
 
 Step 2 — Write Section 1: Executive Summary
 One paragraph: ship/no-ship recommendation and the single strongest concern.
-Write this to {{OUTPUT_PATH}} NOW before proceeding to Section 2.
+Write this to /abs/out.md NOW before proceeding to Section 2.
 
 Step 3 — Write Section 2: Critical Findings
 Label each PM-C1, PM-C2, etc.
 Each finding: title | affected spec section | what is contradictory or genuinely ambiguous (two valid interpretations producing different behavior) | **corrective invariant** (what must become true) | **proposed fix** (one specific way to satisfy it, detailed enough for a spec-writer to act on directly) | **fix confidence** (high/medium/low; if low, state what evidence is needed or who should be consulted).
 If none: write "No critical findings."
-Write this to {{OUTPUT_PATH}} NOW before proceeding to Section 3.
+Write this to /abs/out.md NOW before proceeding to Section 3.
 
 Step 4 — Write Section 3: High Findings
 Label each PM-H1, PM-H2, etc.
 Same structure as Critical. A High finding means an implementer WOULD build the wrong thing, not that they MIGHT need to think. If none: write "No high findings."
-Write this to {{OUTPUT_PATH}} NOW before proceeding to Section 4.
+Write this to /abs/out.md NOW before proceeding to Section 4.
 
 Step 5 — Write Section 4: Medium and Low Findings
 Label each PM-M1, PM-L1, etc.
 Same structure. If none: write "No medium or low findings."
-Write this to {{OUTPUT_PATH}} NOW before proceeding to Section 5.
+Write this to /abs/out.md NOW before proceeding to Section 5.
 
 Step 6 — Write Section 5: Review Evidence
 This section is REQUIRED whether or not you logged findings, and it must be written BEFORE the verdict.
@@ -102,11 +107,11 @@ Write the heading "## Review Evidence" followed by a fenced ```json block contai
 
 Rules for this object:
 - `scope` is `provided-artifact-only` for a spec review. Use `targeted-repository` only if you genuinely read repository files beyond the spec to verify its codebase claims.
-- `files_examined` must include the spec path at {{SPEC_PATH}} and is never empty.
+- `files_examined` must include the spec path at /abs/spec.md and is never empty.
 - `checks_performed` must contain at least one entry, and each `evidence` item must be a specific observed fact. A tool name is NOT evidence. "Read the spec", "reviewed it", and "looks implementable" are NOT evidence.
 - `tools_used: []` is valid and correct when you called no tools.
 - `limitations: []` is valid when there were none.
-Write this to {{OUTPUT_PATH}} NOW before proceeding to Section 6.
+Write this to /abs/out.md NOW before proceeding to Section 6.
 
 Step 7 — Write Section 6: Verdict
 One line: `verdict: pass | findings-logged | fail`
@@ -114,10 +119,10 @@ Criteria:
 - fail = any Critical finding present
 - findings-logged = any High finding present (and no Critical)
 - pass = Medium/Low only, or no findings at all
-Write this to {{OUTPUT_PATH}} NOW.
+Write this to /abs/out.md NOW.
 
 Step 8 — Write the completion marker
-As your absolute final act, append this exact line to {{OUTPUT_PATH}}:
+As your absolute final act, append this exact line to /abs/out.md:
 <!-- REVIEW COMPLETE -->
 
 This marker is how automated tooling distinguishes a complete review from a partial file
@@ -127,7 +132,7 @@ written before context overflow. Do not omit it. Do not write it before the Verd
 <grounding_rules>
 Stay grounded.
 Every MATERIAL claim you make carries an evidentiary burden — that includes findings, their severity, factual statements about the spec or the code, AND any claim that the spec is correct / implementable / complete / ready, or any pass verdict. Record your actual scope, files examined, checks performed, tools used, and limitations in the Review Evidence section. A clearance (pass / no findings) requires at least one concrete recorded check plus a specific observed fact supporting it. The phrases "reviewed", "verified against HEAD", and "looks implementable" are NOT evidence. No-findings is a conclusion that still requires complete Review Evidence; it is not an appearance test. Concision is subordinate to evidentiary completeness. Do not fabricate scope, checks, or tool usage.
-Every finding must cite a specific section or line of the spec at {{SPEC_PATH}}.
+Every finding must cite a specific section or line of the spec at /abs/spec.md.
 Do not invent behavior, constraints, or dependencies not described in the spec.
 If a conclusion depends on an inference, state that explicitly and keep the confidence honest.
 
@@ -138,7 +143,7 @@ Do not go looking for adjacent issues, architectural improvements, or code quali
 When code-review-graph MCP tools are available, prefer them for verifying blast radius, caller/callee, and exhaustiveness claims over grep alone.
 </grounding_rules>
 
-{{FAST_TIER_SCOPE}}
+
 
 <calibration_rules>
 Prefer zero findings over weak findings.
@@ -160,7 +165,7 @@ Before writing the completion marker, verify:
 - Each finding is tied to a specific spec section
 - Each finding is actionable for an engineer fixing the spec
 - The verdict matches the highest severity finding present
-- The "## Review Evidence" section is on disk, is valid JSON, names {{SPEC_PATH}} in `files_examined`, and every `checks_performed` entry carries at least one specific observed fact rather than a restatement of the task or a bare tool name
-- All six sections are on disk at {{OUTPUT_PATH}}
+- The "## Review Evidence" section is on disk, is valid JSON, names /abs/spec.md in `files_examined`, and every `checks_performed` entry carries at least one specific observed fact rather than a restatement of the task or a bare tool name
+- All six sections are on disk at /abs/out.md
 Then write <!-- REVIEW COMPLETE -->.
 </final_check>

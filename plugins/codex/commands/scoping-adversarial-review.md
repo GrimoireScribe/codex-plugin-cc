@@ -1,6 +1,6 @@
 ---
 description: Run an incremental-write adversarial framing review of a scoping plan (phase-level docs/ops/plans/*.md). Writes each of the 5 scoping review sections to disk as it goes and appends <!-- REVIEW COMPLETE --> as the final act. Use this instead of /codex:adversarial-review for scoping plan review.
-argument-hint: '--spec <absolute-scoping-plan-path> --output <absolute-output-path> [--model <model|spark>] [--wait|--background]'
+argument-hint: '--spec <absolute-scoping-plan-path> --output <absolute-output-path> [--model <model|spark>] [--context-file <absolute-path>] [--wait|--background]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 ---
@@ -32,6 +32,10 @@ Argument handling:
 - `--spec <path>`: absolute path to the scoping plan file to review. Required.
 - `--output <path>`: absolute path where the review output should be written. Required.
 - `--model <model>`: model override. Passed through to Codex.
+- `--context-file <path>`: optional absolute path to a UTF-8 text file with supplemental
+  dispatch context (e.g. a POAgent dispatch note) to carry into the review prompt. Read
+  in place; the file's path is never sent to the model, only its contents. Capped at 256 KB.
+  Omit for the default behavior.
 - `--wait`: run in the foreground (default behavior here).
 - `--background`: detach and return immediately.
 - Preserve all user-supplied arguments exactly.

@@ -8,6 +8,7 @@
 
 ## Unreleased
 
+- Add `--context-file <path>` to `/codex:spec-adversarial-review` and `/codex:scoping-adversarial-review`. The file's contents are injected into the review prompt under a fixed, load-bearing `REVIEWER CONTEXT` label that marks them as a supplemental dispatch note rather than artifact content, so carried context stays out of `files_examined`. The file's own path is never sent to the model. A supplied-but-unusable value (empty, missing, unreadable, empty/whitespace-only file, or over the 256 KB cap) fails fast with a nonzero exit before Codex is spawned, so a dispatch that mandates carriage can never run uncarried. With the flag omitted, prompt rendering is unchanged.
 - Make `/codex:review` the default MCP-capable self-collected standard review path.
 - Remove the separate `/codex:review:mcp` and `/codex:review-mcp` command surfaces.
 

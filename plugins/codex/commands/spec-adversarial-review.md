@@ -1,6 +1,6 @@
 ---
 description: Run an incremental-write adversarial review of a spec file. Writes each review section to disk as it goes and appends <!-- REVIEW COMPLETE --> as the final act. Use this instead of /codex:adversarial-review for spec prose review.
-argument-hint: '--spec <absolute-spec-path> --output <absolute-output-path> [--model <model|spark>] [--wait|--background]'
+argument-hint: '--spec <absolute-spec-path> --output <absolute-output-path> [--model <model|spark>] [--context-file <absolute-path>] [--wait|--background]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 ---
@@ -26,6 +26,10 @@ Argument handling:
 - `--spec <path>`: absolute path to the spec file to review. Required.
 - `--output <path>`: absolute path where the review output should be written. Required.
 - `--model <model>`: model override. Passed through to Codex.
+- `--context-file <path>`: optional absolute path to a UTF-8 text file with supplemental
+  dispatch context (e.g. a POAgent dispatch note) to carry into the review prompt. Read
+  in place; the file's path is never sent to the model, only its contents. Capped at 256 KB.
+  Omit for the default behavior.
 - `--wait`: run in the foreground (default behavior here).
 - `--background`: detach and return immediately.
 - Preserve all user-supplied arguments exactly.
