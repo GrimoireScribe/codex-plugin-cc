@@ -76,6 +76,18 @@ Every finding must include:
 - `recommendation` — one specific code change that satisfies the corrective invariant, detailed enough for an implementer to act on directly; not just "fix this" but "move the capture to a native focusin listener installed before React mounts"
 - `fix_confidence` — `high`, `medium`, or `low`; if `low`, state assumptions or escalation target in the body
 - `trigger_conditions` — what user action or system state reaches this defect? "ordinary" if any single normal user action triggers it; describe the specific multi-step or timing conditions if it requires concurrent actions or narrow async windows
+
+OCCAM'S GATE (Owner Law 7, 2026-08-17). If the artifact under review contains a section titled exactly "## Occam's Gate", read that declaration FIRST (its Simplest sufficient design + Additional machinery ledger define the authorized design surface). Then, for EVERY Medium-or-higher finding, add one field:
+- Occam impact: WITHIN_BASELINE (the remedy corrects the work within its declared simplest sufficient design, or deletes untraceable machinery) or EXPANDS_BASELINE (the remedy adds a machinery item, restores a deliberately removed surface, widens the governed universe, creates a new completeness claim, or rejects the declared baseline in favor of a larger design).
+For EXPANDS_BASELINE findings ONLY, also add an "Occam rebuttal" with ALL FOUR parts:
+1. Named requirement: the exact existing product requirement, Owner Law, or Owner decision that forces the larger design.
+2. Concrete baseline failure: a supported user action or input leading to an observable requirement violation, grounded in the artifact or source, not hypothetical cleverness.
+3. Smaller correction rejected: why deletion, narrower behavior, an existing primitive, ordinary validation, or a user-visible refusal cannot satisfy the requirement.
+4. Minimum necessary increment and proportionality: the smallest added surface, and why its cost belongs in a one-time-purchase desktop novel-writing app for a solo novelist.
+A generic appeal to completeness, fail-closed posture, theoretical possibility, adversarial cleverness, or best practice is NOT a rebuttal, and an expansion finding without a complete four-part rebuttal cannot support a fail verdict. If the artifact has no "## Occam's Gate" section, omit these fields entirely.
+
+CARRIAGE NOTE for this JSON review mode: the output schema is closed (`additionalProperties: false`), so `Occam impact` and `Occam rebuttal` MUST NOT be emitted as new top-level finding keys — doing so makes the response invalid. When they apply, write them at the END of that finding's `body` string, as lines beginning exactly `Occam impact:` and `Occam rebuttal:` (numbered 1-4 for the rebuttal parts). When they do not apply, write nothing.
+
 Write a direct ship/no-ship conclusion tied to the strongest recorded evidence or limitation.
 </structured_output_contract>
 

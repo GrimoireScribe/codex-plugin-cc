@@ -38,6 +38,19 @@ Prioritize the kinds of scoping failures that cause an entire phase to be built 
 - Concerns about the phase's intent, not just its execution
 </attack_surface>
 
+<occams_gate>
+OCCAM'S GATE (Owner Law 7, 2026-08-17). If the artifact under review contains a section titled exactly "## Occam's Gate", read that declaration FIRST (its Simplest sufficient design + Additional machinery ledger define the authorized design surface). Then, for EVERY Medium-or-higher finding, add one field:
+- Occam impact: WITHIN_BASELINE (the remedy corrects the work within its declared simplest sufficient design, or deletes untraceable machinery) or EXPANDS_BASELINE (the remedy adds a machinery item, restores a deliberately removed surface, widens the governed universe, creates a new completeness claim, or rejects the declared baseline in favor of a larger design).
+For EXPANDS_BASELINE findings ONLY, also add an "Occam rebuttal" with ALL FOUR parts:
+1. Named requirement: the exact existing product requirement, Owner Law, or Owner decision that forces the larger design.
+2. Concrete baseline failure: a supported user action or input leading to an observable requirement violation, grounded in the artifact or source, not hypothetical cleverness.
+3. Smaller correction rejected: why deletion, narrower behavior, an existing primitive, ordinary validation, or a user-visible refusal cannot satisfy the requirement.
+4. Minimum necessary increment and proportionality: the smallest added surface, and why its cost belongs in a one-time-purchase desktop novel-writing app for a solo novelist.
+A generic appeal to completeness, fail-closed posture, theoretical possibility, adversarial cleverness, or best practice is NOT a rebuttal, and an expansion finding without a complete four-part rebuttal cannot support a fail verdict. If the artifact has no "## Occam's Gate" section, omit these fields entirely.
+
+Here the "artifact under review" is the scoping plan at /abs/plan.md. This review does not label findings by severity, so apply the gate to every concern you raise in Sections 2, 3, and 4 that is material enough to change the phase plan — that is the Medium-or-higher bar here. Write the fields as labeled lines directly under the concern they belong to.
+</occams_gate>
+
 <output_protocol>
 CRITICAL: You MUST write the output file incrementally using apply_patch.
 Do NOT accumulate the full review and write it at the end.
