@@ -1507,9 +1507,14 @@ export async function runCodexExecTask(cwd, options = {}) {
   //
   // Default is 30s. The previous 5s default was too aggressive — gpt-5.4 can take
   // longer than 5s to deliberate between tool calls, causing the child to be killed
-  // mid-turn. Incremental-write reviews (spec/scoping-adversarial-review) use 60s
+  // mid-turn. Incremental-write reviews (spec/scoping-adversarial-review) use 180s
   // (passed explicitly via options.finalizationTimeoutMs) because the model narrates
   // between each apply_patch section with potentially long think gaps.
+  //
+  // A kill from this timer resolves to exit 0 below, on the assumption that a run that
+  // produced a final message succeeded. That assumption does not hold for incremental
+  // reviews, where the last narration can land mid-review — codex-companion.mjs treats a
+  // missing REVIEW COMPLETE marker on those runs as a failure to close that hole.
   const finalizationTimeoutMs = options.finalizationTimeoutMs ?? 30000;
 
   const scheduleFinalizationTimer = () => {

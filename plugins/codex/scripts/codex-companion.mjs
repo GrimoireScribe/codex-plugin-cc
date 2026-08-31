@@ -1065,7 +1065,15 @@ async function executeTaskRun(request) {
   // finalization timer. gpt-5.4 emits planning narration as agent_message items
   // between apply_patch calls, and deliberates for longer than 5s between sections.
   // The default 5s timer was killing the process mid-review.
-  const finalizationTimeoutMs = request.incrementalWrite ? 60000 : undefined;
+  //
+  // Raised 60s -> 180s after PM#2011 V3-e (2026-08-31): gpt-5.6-sol narrated
+  // "I'm adding the concrete repository evidence" and then deliberated on the
+  // Section 5 evidence JSON for longer than 60s. The finalization timer killed
+  // the child at exactly 60.0s, truncating the review after Section 4. Observed
+  // inter-tool gaps on the same tier reach ~85s, so 60s had no margin. The idle
+  // timer (TASK_IDLE_TIMEOUT_MS) remains the real backstop; this timer only
+  // covers the rarer case where turn.completed never fires at all.
+  const finalizationTimeoutMs = request.incrementalWrite ? 180000 : undefined;
 
   const result = await runCodexExecTask(workspaceRoot, {
     resumeThreadId,
@@ -1171,8 +1179,22 @@ async function executeTaskRun(request) {
     );
   const effectiveCodExExit = savePathIsExpected ? 0 : codexExit;
   const decision = decideTaskExit(effectiveCodExExit, request.expectFiles ?? []);
-  const exitStatus = decision.exitStatus;
-  const verificationMessage = decision.verificationMessage;
+  // Incremental reviews contract the model to append REVIEW COMPLETE as its final act.
+  // A missing marker means the file on disk is a TRUNCATED review, not a finished one.
+  // Two upstream behaviours conspire to hide that: a finalization-timer kill resolves to
+  // exit 0 inside runCodexExecTask, and decideTaskExit only checks that the declared path
+  // EXISTS, never that it is complete. So a partial review used to exit 0, and callers
+  // that publish on exit 0 (POAgent's naming_publish_staged) promoted the fragment as a
+  // finished artifact. Publication is one-way — cycles are immutable — so the truncation
+  // has to fail the run, not just set a payload flag.
+  // Scoped to incrementalWrite: generic --expect-file task runs deliver artifacts that
+  // are not reviews and legitimately carry no marker.
+  const incompleteReview = Boolean(request.incrementalWrite) && completionMarkerMissing;
+  const exitStatus = incompleteReview && decision.exitStatus === 0 ? 1 : decision.exitStatus;
+  const verificationMessage =
+    incompleteReview && !decision.verificationMessage
+      ? `Incremental review is incomplete: ${REVIEW_COMPLETE_MARKER} was never written${resolvedSavePath ? ` to ${resolvedSavePath}` : ""}. The review was cut short; do not publish it.`
+      : decision.verificationMessage;
   const expected = decision.expected;
 
   const rendered = renderTaskResult(

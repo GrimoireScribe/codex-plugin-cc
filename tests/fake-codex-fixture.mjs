@@ -356,6 +356,29 @@ function handleExec(args) {
     return false;
   }
 
+  // Incremental-write review simulation (PM#2011 V3-e, 2026-08-31). The real model
+  // writes the review to disk section by section via apply_patch and appends
+  // <!-- REVIEW COMPLETE --> as its final act. When the finalization timer kills the
+  // child mid-review, the CLI still resolves to exit 0 and a partial file is left on
+  // disk. Both behaviours below exit 0 on purpose: exit 0 is exactly the condition
+  // under which a truncated review used to be published as if it were finished.
+  if (BEHAVIOR === "incremental-review-truncated" || BEHAVIOR === "incremental-review-complete") {
+    const outMatch = /Write your review to:\\s*(.+)/.exec(prompt);
+    if (outMatch) {
+      const reviewPath = outMatch[1].trim();
+      let body = "## 1 Executive Summary\\n\\nShip recommendation: pass.\\n\\n"
+        + "## 2 Critical Findings\\n\\nNo critical findings.\\n\\n"
+        + "## 3 High Findings\\n\\nNo high findings.\\n\\n"
+        + "## 4 Medium and Low Findings\\n\\nNo medium or low findings.\\n";
+      if (BEHAVIOR === "incremental-review-complete") {
+        body += "\\n## 5 Review Evidence\\n\\n\`\`\`json\\n{}\\n\`\`\`\\n\\n"
+          + "## 6 Verdict\\n\\nverdict: pass\\n<!-- REVIEW COMPLETE -->\\n";
+      }
+      fs.mkdirSync(path.dirname(reviewPath), { recursive: true });
+      fs.writeFileSync(reviewPath, body, "utf8");
+    }
+  }
+
   emitExecEvent({ type: "thread.started", thread_id: threadId });
   emitExecEvent({ type: "turn.started", turn_id: turnId });
   emitExecEvent({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: payload } });
