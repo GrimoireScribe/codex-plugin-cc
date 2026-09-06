@@ -157,6 +157,23 @@ export function auditGraphWitness(evidence) {
   return warnings;
 }
 
+const AUTHORSHIP_VALUES = new Set(["introduced", "pre-existing", "unverified"]);
+const EXPOSURE_VALUES = new Set(["change-touches-property", "untouched", "not-applicable"]);
+
+function normalizeEnumField(value) {
+  return isNonEmptyString(value) ? value.trim().toLowerCase() : "";
+}
+
+// A finding may support a `needs-attention` verdict only when the change is answerable for
+// the defect: it introduced it, or it left a pre-existing defect newly reachable/worse.
+// `unverified` never qualifies — an unproven classification is not evidence of authorship.
+function findingSupportsBlockingVerdict(finding) {
+  if (finding.authorship === "introduced") {
+    return true;
+  }
+  return finding.authorship === "pre-existing" && finding.exposure === "change-touches-property";
+}
+
 function normalizeReviewFinding(finding, index) {
   const source = finding && typeof finding === "object" && !Array.isArray(finding) ? finding : {};
   const lineStart = Number.isInteger(source.line_start) && source.line_start > 0 ? source.line_start : null;
@@ -177,8 +194,55 @@ function normalizeReviewFinding(finding, index) {
     corrective_invariant: isNonEmptyString(source.corrective_invariant) ? source.corrective_invariant.trim() : "",
     recommendation: typeof source.recommendation === "string" ? source.recommendation.trim() : "",
     fix_confidence: isNonEmptyString(source.fix_confidence) ? source.fix_confidence.trim() : "",
-    trigger_conditions: isNonEmptyString(source.trigger_conditions) ? source.trigger_conditions.trim() : ""
+    trigger_conditions: isNonEmptyString(source.trigger_conditions) ? source.trigger_conditions.trim() : "",
+    // Authorship contract (Owner directive 2026-09-05). A defect the change did not
+    // introduce, worsen, or newly expose is not a finding against the commit. Missing or
+    // unrecognized values normalize to `unverified`, which can never drive a fail verdict —
+    // an omitted classification must not read as an accusation.
+    authorship: AUTHORSHIP_VALUES.has(normalizeEnumField(source.authorship))
+      ? normalizeEnumField(source.authorship)
+      : "unverified",
+    authorship_evidence: isNonEmptyString(source.authorship_evidence) ? source.authorship_evidence.trim() : "",
+    exposure: EXPOSURE_VALUES.has(normalizeEnumField(source.exposure))
+      ? normalizeEnumField(source.exposure)
+      : "not-applicable",
+    exposure_evidence: isNonEmptyString(source.exposure_evidence) ? source.exposure_evidence.trim() : ""
   };
+}
+
+// A `pre-existing` defect the change leaves `untouched` is not a finding against the change.
+// Reviewers still file them as findings, so the renderer moves them rather than trusting the
+// placement rule to have been followed. The demoted item keeps only what the section carries.
+function isDemotableObservation(finding) {
+  return finding.authorship === "pre-existing" && finding.exposure === "untouched";
+}
+
+function observationFromFinding(finding) {
+  return {
+    file: finding.file,
+    line: finding.line_start,
+    note: finding.title
+  };
+}
+
+function normalizeObservation(source) {
+  if (typeof source === "string") {
+    // Tolerated for older stored results, which carried a pre-rendered line.
+    return isNonEmptyString(source) ? { file: source.trim(), line: null, note: "" } : null;
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source) || !isNonEmptyString(source.file)) {
+    return null;
+  }
+  return {
+    file: source.file.trim(),
+    line: Number.isInteger(source.line) && source.line > 0 ? source.line : null,
+    note: isNonEmptyString(source.note) ? source.note.trim() : ""
+  };
+}
+
+function formatObservation(observation) {
+  const location = observation.line === null ? observation.file : `${observation.file}:${observation.line}`;
+  return observation.note ? `${location} — ${observation.note}` : location;
 }
 
 function normalizeReviewEvidence(evidence) {
@@ -213,6 +277,11 @@ function normalizeReviewResultData(data) {
     summary: data.summary.trim(),
     review_evidence: normalizeReviewEvidence(data.review_evidence),
     findings: data.findings.map((finding, index) => normalizeReviewFinding(finding, index)),
+    // Not required by validateReviewResultShape: jobs stored before the authorship contract
+    // have no such key, and an older result must still render rather than fail validation.
+    pre_existing_observations: (Array.isArray(data.pre_existing_observations) ? data.pre_existing_observations : [])
+      .map((item) => normalizeObservation(item))
+      .filter((item) => item !== null),
     next_steps: data.next_steps
       .filter((step) => typeof step === "string" && step.trim())
       .map((step) => step.trim())
@@ -435,7 +504,13 @@ export function renderReviewResult(parsedResult, meta) {
   }
 
   const data = normalizeReviewResultData(parsedResult.parsed);
-  const findings = [...data.findings].sort((left, right) => severityRank(left.severity) - severityRank(right.severity));
+  // Demote before sorting: a pre-existing/untouched item must not appear among findings,
+  // must not carry severity into the ordering, and must not reach the verdict gate.
+  const demoted = data.findings.filter((finding) => isDemotableObservation(finding));
+  const findings = data.findings
+    .filter((finding) => !isDemotableObservation(finding))
+    .sort((left, right) => severityRank(left.severity) - severityRank(right.severity));
+  const observations = [...data.pre_existing_observations, ...demoted.map((finding) => observationFromFinding(finding))];
   const lines = [
     `# Codex ${meta.reviewLabel}`,
     "",
@@ -474,6 +549,38 @@ export function renderReviewResult(parsedResult, meta) {
       if (finding.fix_confidence) {
         lines.push(`  Fix confidence: ${finding.fix_confidence}`);
       }
+      lines.push(`  Authorship: ${finding.authorship}`);
+      if (finding.authorship_evidence) {
+        lines.push(`  Authorship evidence: ${finding.authorship_evidence}`);
+      }
+      if (finding.authorship === "pre-existing") {
+        lines.push(`  Exposure: ${finding.exposure}`);
+        if (finding.exposure_evidence) {
+          lines.push(`  Exposure evidence: ${finding.exposure_evidence}`);
+        }
+      }
+    }
+
+  }
+
+  // Disclosure, not correction. The verdict stays exactly as the reviewer returned it; this
+  // only names the case where a blocking verdict rests on nothing the change is answerable
+  // for, so a downstream judge sees the gap instead of inheriting the claim. It sits outside
+  // the findings branch on purpose: demotion can empty `findings` entirely, and that is
+  // precisely the case worth flagging.
+  if (data.verdict === "needs-attention" && !findings.some(findingSupportsBlockingVerdict)) {
+    lines.push(
+      "",
+      "- [PLUGIN-AUTHORSHIP-WARNING] Verdict is `needs-attention` but no finding is `introduced`, " +
+        "nor `pre-existing` with `exposure: change-touches-property`. Under the authorship rule a " +
+        "blocking verdict cannot rest on these findings."
+    );
+  }
+
+  if (observations.length > 0) {
+    lines.push("", "## Pre-existing observations (not findings)", "");
+    for (const observation of observations) {
+      lines.push(`- ${formatObservation(observation)}`);
     }
   }
 

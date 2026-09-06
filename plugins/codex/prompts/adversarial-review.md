@@ -44,6 +44,7 @@ If the user supplied a focus area, weight it heavily, but still report any other
 </review_method>
 
 <finding_bar>
+Before reporting anything, settle its authorship (see AUTHORSHIP below). A defect that already stood at the baseline and that this change does not touch is not a finding against this change.
 Report only material findings.
 Do not include style feedback, naming feedback, low-value cleanup, or speculative concerns without evidence.
 A finding should answer:
@@ -77,6 +78,24 @@ Every finding must include:
 - `fix_confidence` — `high`, `medium`, or `low`; if `low`, state assumptions or escalation target in the body
 - `trigger_conditions` — what user action or system state reaches this defect? "ordinary" if any single normal user action triggers it; describe the specific multi-step or timing conditions if it requires concurrent actions or narrow async windows
 
+AUTHORSHIP (Owner directive, 2026-09-05). You are reviewing a CHANGE, not a codebase. A defect the change did not introduce, worsen, or newly expose is NOT a finding against this change, and must never drive a blocking verdict. Classify every finding before you report it.
+
+The BASELINE is the state of the code immediately before the change: the parent commit (`<sha>^`) for a single commit, the range base for a commit range, the merge base for a branch review, and committed `HEAD` for a working-tree review.
+
+Every finding MUST carry three additional fields:
+- `authorship` — `introduced` (the defective behavior is ABSENT at the baseline and PRESENT at the reviewed state), `pre-existing` (the defective behavior is PRESENT at the baseline too), or `unverified` (you could not obtain the baseline bytes).
+- `authorship_evidence` — the proof of that classification. Acceptable proof is: the removed `-` line(s) from the diff; the unchanged context line(s) showing the defect already stood there; or baseline bytes read with `git show <baseline>:<path>`, quoted with their line number. A restatement of the finding is NOT authorship evidence. With no such proof, `authorship` MUST be `unverified` and this field MUST state why the baseline bytes were unobtainable.
+- `exposure` — meaningful only when `authorship` is `pre-existing`, where it is either `change-touches-property` (the change makes the defect newly reachable, makes it worse, or blocks an acceptance criterion of the governing spec) or `untouched`. When `authorship` is `introduced` or `unverified`, set `exposure` to `not-applicable`.
+- `exposure_evidence` — required when `exposure` is `change-touches-property`: the changed hunk that makes the defect newly reachable, worse, or spec-blocking, quoted with its file and line. Set it to the empty string `""` in every other case.
+
+Both `exposure` and `exposure_evidence` are keys the schema always requires, so always emit them; the sentinel values `not-applicable` and `""` are how you say "does not apply".
+
+Reading the diff for authorship: a defect sitting on an unchanged context line (leading space, not `+`) was already there — that is `pre-existing`, and the context line itself is the evidence. A `+` line is where introduction can happen. Removed `-` lines show what the baseline said. If the diff alone does not settle it, you MAY run read-only `git show`, `git diff`, and `git log` to read the baseline — this is a narrow exception to any scope or no-shell instruction elsewhere in this prompt, granted for authorship verification ONLY. Do not use it to widen the review, to explore unrelated files, or to run any other command. If you still cannot obtain the baseline bytes, use `unverified` rather than guessing.
+
+PLACEMENT RULE. `authorship: pre-existing` together with `exposure: untouched` is NOT a finding. Do not put it in `findings`. Put it in the top-level `pre_existing_observations` array as one object `{"file": "<path>", "line": <integer>, "note": "<one sentence>"}`. No severity, no recommendation, no rationale, no effect on the verdict. Return `[]` when there are none; the array is required either way.
+
+VERDICT RULE. `needs-attention` may rest ONLY on findings whose `authorship` is `introduced`, or whose `authorship` is `pre-existing` with `exposure: change-touches-property`. `unverified` findings never drive `needs-attention`; keep them in `findings` with honest confidence, but do not let them block. If no finding qualifies under this rule, the verdict is `approve`.
+
 OCCAM'S GATE (Owner Law 7, 2026-08-17). If the artifact under review contains a section titled exactly "## Occam's Gate", read that declaration FIRST (its Simplest sufficient design + Additional machinery ledger define the authorized design surface). Then, for EVERY Medium-or-higher finding, add one field:
 - Occam impact: WITHIN_BASELINE (the remedy corrects the work within its declared simplest sufficient design, or deletes untraceable machinery) or EXPANDS_BASELINE (the remedy adds a machinery item, restores a deliberately removed surface, widens the governed universe, creates a new completeness claim, or rejects the declared baseline in favor of a larger design).
 For EXPANDS_BASELINE findings ONLY, also add an "Occam rebuttal" with ALL FOUR parts:
@@ -86,7 +105,7 @@ For EXPANDS_BASELINE findings ONLY, also add an "Occam rebuttal" with ALL FOUR p
 4. Minimum necessary increment and proportionality: the smallest added surface, and why its cost belongs in a one-time-purchase desktop novel-writing app for a solo novelist.
 A generic appeal to completeness, fail-closed posture, theoretical possibility, adversarial cleverness, or best practice is NOT a rebuttal, and an expansion finding without a complete four-part rebuttal cannot support a fail verdict. If the artifact has no "## Occam's Gate" section, omit these fields entirely.
 
-CARRIAGE NOTE for this JSON review mode: the output schema is closed (`additionalProperties: false`), so `Occam impact` and `Occam rebuttal` MUST NOT be emitted as new top-level finding keys — doing so makes the response invalid. When they apply, write them at the END of that finding's `body` string, as lines beginning exactly `Occam impact:` and `Occam rebuttal:` (numbered 1-4 for the rebuttal parts). When they do not apply, write nothing.
+CARRIAGE NOTE for this JSON review mode: the output schema is closed (`additionalProperties: false`), so `Occam impact` and `Occam rebuttal` MUST NOT be emitted as new top-level finding keys — doing so makes the response invalid. When they apply, write them at the END of that finding's `body` string, as lines beginning exactly `Occam impact:` and `Occam rebuttal:` (numbered 1-4 for the rebuttal parts). When they do not apply, write nothing. This carriage restriction applies ONLY to the two Occam fields: `authorship`, `authorship_evidence`, `exposure`, `exposure_evidence`, and the top-level `pre_existing_observations` array ARE schema fields — emit them as normal JSON keys, never inside `body`.
 
 Write a direct ship/no-ship conclusion tied to the strongest recorded evidence or limitation.
 </structured_output_contract>
@@ -113,6 +132,8 @@ Then check that each finding is:
 - plausible under a real failure scenario
 - actionable for an engineer fixing the issue
 - carrying `severity_rationale`, `corrective_invariant`, `recommendation`, `fix_confidence`, and `trigger_conditions`
+- carrying `authorship`, `authorship_evidence`, `exposure`, and `exposure_evidence`, with the classification proved rather than asserted
+Then check the verdict rule: if you are returning `needs-attention`, at least one finding must be `authorship: introduced` or `pre-existing` with `exposure: change-touches-property`, and every `pre-existing`/`untouched` item must have been moved out of `findings` into `pre_existing_observations`.
 </final_check>
 
 <repository_context>

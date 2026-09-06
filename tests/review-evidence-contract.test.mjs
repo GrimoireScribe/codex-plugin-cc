@@ -31,6 +31,7 @@ const DIFF_ONLY_CLEARANCE = {
     limitations: []
   },
   findings: [],
+  pre_existing_observations: [],
   next_steps: []
 };
 
@@ -46,7 +47,11 @@ const FULL_FINDING = {
   corrective_invariant: "A focusin listener must be installed before the first paint that can receive focus.",
   recommendation: "Move the capture to a native focusin listener installed before React mounts.",
   fix_confidence: "medium",
-  trigger_conditions: "Ordinary — any keyboard user tabbing into the dialog on first render."
+  trigger_conditions: "Ordinary — any keyboard user tabbing into the dialog on first render.",
+  authorship: "introduced",
+  authorship_evidence: "Diff removes `- addEventListener('focusin', capture)` from the constructor at FocusTrap.jsx:38 and adds it inside useEffect at :42.",
+  exposure: "not-applicable",
+  exposure_evidence: ""
 };
 
 // --- Assertion 1: provided-diff-only clearance PASSES ------------------------------
@@ -118,6 +123,7 @@ test("assertion 3: rendered document exposes all six per-finding fields", () => 
       limitations: ["Did not exercise the change at runtime."]
     },
     findings: [FULL_FINDING],
+    pre_existing_observations: [],
     next_steps: ["Reinstall the focus listener before mount."]
   };
 
@@ -132,6 +138,10 @@ test("assertion 3: rendered document exposes all six per-finding fields", () => 
   assert.match(output, /Recommendation: Move the capture to a native focusin listener/);
   assert.match(output, /Fix confidence: medium/);
   assert.match(output, /Trigger conditions: Ordinary/);
+  assert.match(output, /Authorship: introduced/);
+  assert.match(output, /Authorship evidence: Diff removes/);
+  // `introduced` is answerable, so the blocking verdict stands unflagged.
+  assert.doesNotMatch(output, /PLUGIN-AUTHORSHIP-WARNING/);
 });
 
 // --- Assertion 4: deep-tier graph witness -----------------------------------------

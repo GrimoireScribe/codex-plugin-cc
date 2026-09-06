@@ -7,6 +7,7 @@
     "summary",
     "review_evidence",
     "findings",
+    "pre_existing_observations",
     "next_steps"
   ],
   "properties": {
@@ -108,7 +109,11 @@
           "corrective_invariant",
           "recommendation",
           "fix_confidence",
-          "trigger_conditions"
+          "trigger_conditions",
+          "authorship",
+          "authorship_evidence",
+          "exposure",
+          "exposure_evidence"
         ],
         "properties": {
           "severity": {
@@ -166,6 +171,55 @@
             ]
           },
           "trigger_conditions": {
+            "type": "string",
+            "minLength": 1
+          },
+          "authorship": {
+            "type": "string",
+            "enum": [
+              "introduced",
+              "pre-existing",
+              "unverified"
+            ]
+          },
+          "authorship_evidence": {
+            "type": "string",
+            "minLength": 1
+          },
+          "exposure": {
+            "type": "string",
+            "enum": [
+              "change-touches-property",
+              "untouched",
+              "not-applicable"
+            ]
+          },
+          "exposure_evidence": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "pre_existing_observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "file",
+          "line",
+          "note"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "note": {
             "type": "string",
             "minLength": 1
           }
