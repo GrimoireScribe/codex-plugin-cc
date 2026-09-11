@@ -428,6 +428,67 @@ function handleExec(args) {
     return false;
   }
 
+  // Finalization-timer simulation (2026-09-11). BEHAVIOR is "finalization:" + JSON config:
+  //   rollout: false skips the session log entirely
+  //   phase:   phase recorded on the first message ("commentary", "final_answer", or null)
+  //   after:   what the session log gets after that message: "tool-calls", "neutral"
+  //            (bookkeeping records only), "task-complete", or "silence"
+  //   finish:  "exit" sends the real final answer after 5s and exits; "hang" never exits
+  //   logMessage: false leaves the first message out of the session log
+  if (BEHAVIOR.startsWith("finalization:")) {
+    const cfg = JSON.parse(BEHAVIOR.slice("finalization:".length));
+    const day = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    let rolloutPath = null;
+    if (cfg.rollout !== false) {
+      const sessionsDir = path.join(process.env.CODEX_HOME, "sessions", String(day.getFullYear()), pad(day.getMonth() + 1), pad(day.getDate()));
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      rolloutPath = path.join(sessionsDir, "rollout-fake-" + threadId + ".jsonl");
+      fs.writeFileSync(rolloutPath, JSON.stringify({ type: "session_meta", payload: {} }) + "\\n");
+    }
+    const record = (type, recordPayload) => {
+      if (rolloutPath) {
+        fs.appendFileSync(rolloutPath, JSON.stringify({ timestamp: new Date().toISOString(), type, payload: recordPayload }) + "\\n");
+      }
+    };
+    const sendMessage = (text, phase, logged = true) => {
+      const extra = phase ? { phase } : {};
+      if (logged) {
+        record("event_msg", { type: "item_completed", item: { type: "AgentMessage", content: [{ type: "Text", text }], ...extra } });
+        record("response_item", { type: "message", role: "assistant", content: [{ type: "output_text", text }], ...extra });
+      }
+      emitExecEvent({ type: "item.completed", item: { id: "item_" + text.length, type: "agent_message", text } });
+    };
+    emitExecEvent({ type: "thread.started", thread_id: threadId });
+    emitExecEvent({ type: "turn.started", turn_id: turnId });
+    const firstText = cfg.finish === "exit" ? "Still waiting on the command." : payload;
+    sendMessage(firstText, cfg.phase, cfg.logMessage !== false);
+    if (cfg.after === "tool-calls") {
+      setInterval(() => {
+        record("response_item", { type: "custom_tool_call", name: "exec", input: "text(await tools.write_stdin({session_id:1}))" });
+        record("response_item", { type: "custom_tool_call_output", output: "PASS: slow case" });
+      }, 200);
+    } else if (cfg.after === "neutral" || cfg.after === "task-complete") {
+      setTimeout(() => {
+        record("event_msg", { type: "token_count", info: null });
+        if (cfg.after === "task-complete") {
+          record("event_msg", { type: "task_complete", last_agent_message: firstText });
+        }
+      }, 100);
+    }
+    if (cfg.finish === "exit") {
+      setTimeout(() => {
+        sendMessage(payload, cfg.phase === null ? null : "final_answer");
+        record("event_msg", { type: "task_complete", last_agent_message: payload });
+        emitExecEvent({ type: "turn.completed" });
+        writeLastMessageFile(outputLastMessage, payload);
+        process.exit(0);
+      }, 5000);
+    }
+    setInterval(() => {}, 60000);
+    return false;
+  }
+
   // Incremental-write review simulation (PM#2011 V3-e, 2026-08-31). The real model
   // writes the review to disk section by section via apply_patch and appends
   // <!-- REVIEW COMPLETE --> as its final act. When the finalization timer kills the

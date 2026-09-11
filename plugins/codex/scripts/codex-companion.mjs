@@ -72,6 +72,9 @@ const TASK_IDLE_TIMEOUT_MS = readPositiveEnvInt("CODEX_TASK_IDLE_TIMEOUT_MS", 30
 // Cap on stdout silence excused by Codex session-log growth. Unset keeps the
 // runtime default (45 min) in lib/codex.mjs.
 const TASK_MAX_SILENT_MS = readPositiveEnvInt("CODEX_TASK_MAX_SILENT_MS", undefined);
+// Override for the finalization timer. Unset keeps the runtime default (30s), or 180s
+// for incremental-write reviews.
+const TASK_FINALIZATION_TIMEOUT_MS = readPositiveEnvInt("CODEX_TASK_FINALIZATION_TIMEOUT_MS", undefined);
 const MAX_CODEX_EXEC_PROMPT_CHARS = readPositiveEnvInt("CODEX_MAX_PROMPT_CHARS", 900000);
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const REASONING_EFFORT_ALIASES = new Map([["minimal", "low"]]);
@@ -954,7 +957,8 @@ async function executeReviewRun(request) {
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     onProgress: request.onProgress,
     idleTimeoutMs: TASK_IDLE_TIMEOUT_MS,
-    maxSilentMs: TASK_MAX_SILENT_MS
+    maxSilentMs: TASK_MAX_SILENT_MS,
+    finalizationTimeoutMs: TASK_FINALIZATION_TIMEOUT_MS
   });
   // Use lastMessage (the final agent_message only) for JSON parsing — the review
   // schema expects a single JSON blob, not the accumulated multi-message string.
@@ -1077,7 +1081,7 @@ async function executeTaskRun(request) {
   // inter-tool gaps on the same tier reach ~85s, so 60s had no margin. The idle
   // timer (TASK_IDLE_TIMEOUT_MS) remains the real backstop; this timer only
   // covers the rarer case where turn.completed never fires at all.
-  const finalizationTimeoutMs = request.incrementalWrite ? 180000 : undefined;
+  const finalizationTimeoutMs = TASK_FINALIZATION_TIMEOUT_MS ?? (request.incrementalWrite ? 180000 : undefined);
 
   const result = await runCodexExecTask(workspaceRoot, {
     resumeThreadId,

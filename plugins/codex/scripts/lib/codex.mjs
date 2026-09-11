@@ -156,6 +156,94 @@ function findExecRolloutPath(threadId, env = process.env) {
   return null;
 }
 
+// Enough of the rollout tail to find the last agent_message and everything after it, even
+// across a 180s incremental-review finalization window full of tool output.
+const ROLLOUT_TAIL_BYTES = 4 * 1024 * 1024;
+
+function readRolloutTail(filePath) {
+  let fd = null;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, size - ROLLOUT_TAIL_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    fs.readSync(fd, buffer, 0, buffer.length, start);
+    const lines = buffer.toString("utf8").split("\n");
+    if (start > 0) {
+      lines.shift();
+    }
+    lines.pop();
+    const records = [];
+    for (const line of lines) {
+      try {
+        records.push(JSON.parse(line));
+      } catch {
+        // A line cut by a concurrent write, or not JSON at all.
+      }
+    }
+    return records;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Already closed.
+      }
+    }
+  }
+}
+
+function joinRolloutText(content) {
+  return Array.isArray(content)
+    ? content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("")
+    : "";
+}
+
+function readRolloutAgentMessage(record) {
+  const payload = record?.payload;
+  if (record?.type === "response_item" && payload?.type === "message" && payload.role === "assistant") {
+    return { text: joinRolloutText(payload.content), phase: payload.phase ?? null };
+  }
+  if (record?.type === "event_msg" && payload?.type === "item_completed" && payload.item?.type === "AgentMessage") {
+    return { text: joinRolloutText(payload.item.content), phase: payload.item.phase ?? null };
+  }
+  return null;
+}
+
+// Decides from the session rollout whether an agent_message ended the turn. Codex CLI 0.154
+// prints no phase on --json agent_message events and nothing at all while the model polls a
+// running command, but the rollout records each message's phase ("commentary" or
+// "final_answer"), every tool call and its output, and a task_complete record when the turn
+// really ends. Returns "final", "not-final", or "unknown" when the message is not in the tail.
+function classifyAgentMessage(records, text) {
+  if (!Array.isArray(records) || typeof text !== "string" || !text) {
+    return "unknown";
+  }
+  let index = -1;
+  let phase = null;
+  for (let i = records.length - 1; i >= 0; i -= 1) {
+    const message = readRolloutAgentMessage(records[i]);
+    if (message && message.text === text) {
+      index = i;
+      phase = message.phase;
+      break;
+    }
+  }
+  if (index === -1) {
+    return "unknown";
+  }
+  const after = records.slice(index + 1);
+  if (after.some((record) => record?.type === "event_msg" && record.payload?.type === "task_complete")) {
+    return "final";
+  }
+  if (after.some((record) => record?.type === "response_item" && /_call(_output)?$/.test(String(record.payload?.type ?? "")))) {
+    return "not-final";
+  }
+  return phase === "commentary" ? "not-final" : "final";
+}
+
 function resolveCodexSpawnTarget(env = process.env) {
   if (process.platform !== "win32") {
     return { command: "codex", shell: false, preArgs: [] };
@@ -1532,12 +1620,15 @@ export async function runCodexExecTask(cwd, options = {}) {
   // alone can keep a turn alive, so a model polling a truly hung command still dies.
   const maxSilentMs = options.maxSilentMs ?? DEFAULT_EXEC_MAX_SILENT_MS;
 
-  const sampleRolloutSize = () => {
-    if (!threadId) {
-      return null;
+  const resolveRolloutPath = () => {
+    if (threadId) {
+      rolloutPath ??= findExecRolloutPath(threadId, options.env ?? process.env);
     }
-    rolloutPath ??= findExecRolloutPath(threadId, options.env ?? process.env);
-    if (!rolloutPath) {
+    return rolloutPath;
+  };
+
+  const sampleRolloutSize = () => {
+    if (!resolveRolloutPath()) {
       return null;
     }
     try {
@@ -1602,11 +1693,30 @@ export async function runCodexExecTask(cwd, options = {}) {
   // produced a final message succeeded. That assumption does not hold for incremental
   // reviews, where the last narration can land mid-review — codex-companion.mjs treats a
   // missing REVIEW COMPLETE marker on those runs as a failure to close that hole.
+  //
+  // When the timer fires it no longer assumes the message was final (2026-09-11). Codex CLI
+  // 0.154 prints no phase on agent_message events and nothing while the model polls a long
+  // command, so a mid-turn "still waiting" message followed by 30s of polling used to be
+  // published as the answer. classifyAgentMessage reads the session rollout instead: a
+  // task_complete record after the message means final; a tool call or tool output after it,
+  // or a "commentary" phase on it, means not final, and the run is left to the idle timer and
+  // its silence ceiling. A message that cannot be found in the rollout finalizes as before.
   const finalizationTimeoutMs = options.finalizationTimeoutMs ?? 30000;
 
   const scheduleFinalizationTimer = () => {
     clearFinalizationTimer();
     finalizationTimer = setTimeout(() => {
+      finalizationTimer = null;
+      const records = resolveRolloutPath() ? readRolloutTail(rolloutPath) : null;
+      if (classifyAgentMessage(records, lastMessage) === "not-final") {
+        finalizedAfterMessage = false;
+        emitProgress(
+          options.onProgress,
+          "Codex's last message was not its final answer (its session log shows the turn still in progress). Still waiting.",
+          "investigating"
+        );
+        return;
+      }
       finalizedAfterMessage = true;
       killChild();
     }, finalizationTimeoutMs);

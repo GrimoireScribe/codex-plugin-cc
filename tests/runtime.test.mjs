@@ -962,6 +962,87 @@ test("task re-baselines the session log at every Codex event", () => {
   assert.doesNotMatch(result.stderr, /session log is still growing/);
 });
 
+function runFinalizationTask(config) {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const codexHome = makeTempDir();
+  installFakeCodex(binDir, "finalization:" + JSON.stringify(config));
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  return run("node", [SCRIPT, "task", "wait for the slow command and report"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_HOME: codexHome,
+      CODEX_TASK_IDLE_TIMEOUT_MS: "10000",
+      CODEX_TASK_FINALIZATION_TIMEOUT_MS: "800"
+    },
+    timeout: 60000
+  });
+}
+
+// 2026-09-11: the finalization timer treated any agent_message followed by 30s of stdout
+// silence as the final answer. A live probe showed a mid-turn "still waiting" message
+// followed by 47s of silent polling, which would have been published as the result.
+test("task does not finalize on a mid-turn commentary message while Codex keeps calling tools", () => {
+  const result = runFinalizationTask({ phase: "commentary", after: "tool-calls", finish: "exit" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Handled the requested task\./);
+  assert.doesNotMatch(result.stdout, /Still waiting on the command\./);
+});
+
+test("task does not finalize on a commentary message followed by silent deliberation", () => {
+  const result = runFinalizationTask({ phase: "commentary", after: "silence", finish: "exit" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Handled the requested task\./);
+  assert.doesNotMatch(result.stdout, /Still waiting on the command\./);
+});
+
+test("task does not finalize on an unphased message once the session log shows tool calls after it", () => {
+  const result = runFinalizationTask({ phase: null, after: "tool-calls", finish: "exit" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Handled the requested task\./);
+  assert.doesNotMatch(result.stdout, /Still waiting on the command\./);
+});
+
+test("task still finalizes promptly when the session log marks the turn complete", () => {
+  const result = runFinalizationTask({ phase: "commentary", after: "task-complete", finish: "hang" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Handled the requested task\./);
+  assert.doesNotMatch(result.stderr, /timed out/);
+});
+
+test("task finalizes a final-answer message followed only by bookkeeping records", () => {
+  const result = runFinalizationTask({ phase: "final_answer", after: "neutral", finish: "hang" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Handled the requested task\./);
+  assert.doesNotMatch(result.stderr, /timed out/);
+});
+
+test("task finalizes as before when no session log can be found", () => {
+  const result = runFinalizationTask({ rollout: false, phase: null, after: "silence", finish: "hang" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Handled the requested task\./);
+  assert.doesNotMatch(result.stderr, /timed out/);
+});
+
+test("task finalizes as before when the session log does not contain the message", () => {
+  const result = runFinalizationTask({ logMessage: false, phase: "commentary", after: "silence", finish: "hang" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Handled the requested task\./);
+  assert.doesNotMatch(result.stderr, /timed out/);
+});
+
 test("task measures the silent ceiling from the last Codex event, not from launch", () => {
   const result = runSilentRolloutTask("silent-rollout-chatty", { CODEX_TASK_MAX_SILENT_MS: "6000" });
 
