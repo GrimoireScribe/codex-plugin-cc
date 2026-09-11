@@ -390,6 +390,44 @@ function handleExec(args) {
     return false;
   }
 
+  // Falsifiers for how the liveness baseline is taken (blind review of 404288d):
+  //   silent-rollout-dead-after-start: startup records, then nothing at all
+  //   silent-rollout-dead-after-event: startup records, one later event, then nothing
+  //   silent-rollout-chatty: log always growing, an event every 1.5s, finishes after ~6s
+  if (BEHAVIOR === "silent-rollout-dead-after-start" || BEHAVIOR === "silent-rollout-dead-after-event" || BEHAVIOR === "silent-rollout-chatty") {
+    const day = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const sessionsDir = path.join(process.env.CODEX_HOME, "sessions", String(day.getFullYear()), pad(day.getMonth() + 1), pad(day.getDate()));
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    const rolloutPath = path.join(sessionsDir, "rollout-fake-" + threadId + ".jsonl");
+    fs.writeFileSync(rolloutPath, JSON.stringify({ type: "session_meta" }) + "\\n");
+    // One write, so both lines reach the runtime in a single chunk, before it knows the thread id.
+    process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: threadId }) + "\\n" + JSON.stringify({ type: "turn.started", turn_id: turnId }) + "\\n");
+    if (BEHAVIOR === "silent-rollout-dead-after-event") {
+      setTimeout(() => {
+        fs.appendFileSync(rolloutPath, JSON.stringify({ type: "reasoning" }) + "\\n");
+        emitExecEvent({ type: "item.completed", item: { id: "item_r", type: "reasoning" } });
+      }, 200);
+    }
+    if (BEHAVIOR === "silent-rollout-chatty") {
+      const started = Date.now();
+      setInterval(() => {
+        fs.appendFileSync(rolloutPath, JSON.stringify({ type: "poll" }) + "\\n");
+      }, 50);
+      setInterval(() => {
+        if (Date.now() - started >= 6000) {
+          emitExecEvent({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: payload } });
+          emitExecEvent({ type: "turn.completed" });
+          writeLastMessageFile(outputLastMessage, payload);
+          process.exit(0);
+        }
+        emitExecEvent({ type: "item.completed", item: { id: "item_c", type: "reasoning" } });
+      }, 1500);
+    }
+    setInterval(() => {}, 60000);
+    return false;
+  }
+
   // Incremental-write review simulation (PM#2011 V3-e, 2026-08-31). The real model
   // writes the review to disk section by section via apply_patch and appends
   // <!-- REVIEW COMPLETE --> as its final act. When the finalization timer kills the

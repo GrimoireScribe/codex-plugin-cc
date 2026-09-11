@@ -946,6 +946,29 @@ test("task times out at the silent ceiling even while the session log keeps grow
   assert.match(result.stderr, /Codex turn timed out after \d+s without emitting events\. Its session log was still growing/);
 });
 
+test("task does not count session-log records written before thread start as growth", () => {
+  const result = runSilentRolloutTask("silent-rollout-dead-after-start");
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex turn timed out after 1s without progress\./);
+  assert.doesNotMatch(result.stderr, /session log is still growing/);
+});
+
+test("task re-baselines the session log at every Codex event", () => {
+  const result = runSilentRolloutTask("silent-rollout-dead-after-event");
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex turn timed out after 1s without progress\./);
+  assert.doesNotMatch(result.stderr, /session log is still growing/);
+});
+
+test("task measures the silent ceiling from the last Codex event, not from launch", () => {
+  const result = runSilentRolloutTask("silent-rollout-chatty", { CODEX_TASK_MAX_SILENT_MS: "3000" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /timed out/);
+});
+
 test("task logs reasoning summaries and assistant messages to the job log", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

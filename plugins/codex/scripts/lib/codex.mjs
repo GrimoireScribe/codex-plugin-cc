@@ -1667,7 +1667,12 @@ export async function runCodexExecTask(cwd, options = {}) {
         case "thread.started":
           threadId = event.thread_id ?? threadId;
           // resetIdleTimer ran before this line was parsed, while threadId was still
-          // unknown. Re-take the baseline now so startup records are not counted as growth.
+          // unknown. Re-take the baseline now so startup records already on disk are not
+          // counted as growth. If Codex has not created the rollout yet, the baseline stays
+          // null and the file's first contents count as growth once. That costs one extra
+          // idle window for a turn that dies right after creating its log, and in exchange a
+          // live turn whose log appears late is never killed (real CLI rollouts have appeared
+          // up to 59s after thread start).
           rolloutBaseline = sampleRolloutSize();
           emitProgress(options.onProgress, threadId ? `Thread ready (${threadId}).` : "Thread ready.", "starting", {
             threadId: threadId ?? null
