@@ -963,7 +963,7 @@ test("task re-baselines the session log at every Codex event", () => {
 });
 
 test("task measures the silent ceiling from the last Codex event, not from launch", () => {
-  const result = runSilentRolloutTask("silent-rollout-chatty", { CODEX_TASK_MAX_SILENT_MS: "3000" });
+  const result = runSilentRolloutTask("silent-rollout-chatty", { CODEX_TASK_MAX_SILENT_MS: "6000" });
 
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stderr, /timed out/);

@@ -393,7 +393,7 @@ function handleExec(args) {
   // Falsifiers for how the liveness baseline is taken (blind review of 404288d):
   //   silent-rollout-dead-after-start: startup records, then nothing at all
   //   silent-rollout-dead-after-event: startup records, one later event, then nothing
-  //   silent-rollout-chatty: log always growing, an event every 1.5s, finishes after ~6s
+  //   silent-rollout-chatty: log always growing, an event every 1.5s, finishes after ~12s
   if (BEHAVIOR === "silent-rollout-dead-after-start" || BEHAVIOR === "silent-rollout-dead-after-event" || BEHAVIOR === "silent-rollout-chatty") {
     const day = new Date();
     const pad = (n) => String(n).padStart(2, "0");
@@ -415,7 +415,7 @@ function handleExec(args) {
         fs.appendFileSync(rolloutPath, JSON.stringify({ type: "poll" }) + "\\n");
       }, 50);
       setInterval(() => {
-        if (Date.now() - started >= 6000) {
+        if (Date.now() - started >= 12000) {
           emitExecEvent({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: payload } });
           emitExecEvent({ type: "turn.completed" });
           writeLastMessageFile(outputLastMessage, payload);
