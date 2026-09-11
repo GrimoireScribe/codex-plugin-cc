@@ -901,6 +901,51 @@ test("task fails fast when a turn goes silent without completing", () => {
   assert.match(result.stderr, /Codex turn timed out after 1s without progress\./);
 });
 
+function runSilentRolloutTask(behavior, extraEnv = {}) {
+  const repo = makeTempDir();
+  const binDir = makeTempDir();
+  const codexHome = makeTempDir();
+  installFakeCodex(binDir, behavior);
+  initGitRepo(repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  run("git", ["add", "README.md"], { cwd: repo });
+  run("git", ["commit", "-m", "init"], { cwd: repo });
+
+  return run("node", [SCRIPT, "task", "run the slow test file and report"], {
+    cwd: repo,
+    env: {
+      ...buildEnv(binDir),
+      CODEX_HOME: codexHome,
+      CODEX_TASK_IDLE_TIMEOUT_MS: "1000",
+      ...extraEnv
+    },
+    timeout: 60000
+  });
+}
+
+// PM#2053 (2026-09-11): two DEEP reviews were killed while Codex was polling a slow
+// test file. The CLI emitted nothing on stdout, but its session log kept growing.
+test("task is not killed while stdout is silent but the Codex session log keeps growing", () => {
+  const result = runSilentRolloutTask("silent-rollout-progress");
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /timed out/);
+});
+
+test("task still times out once a silent turn's session log stops growing", () => {
+  const result = runSilentRolloutTask("silent-rollout-stops");
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex turn timed out after 1s without progress\./);
+});
+
+test("task times out at the silent ceiling even while the session log keeps growing", () => {
+  const result = runSilentRolloutTask("silent-rollout-forever", { CODEX_TASK_MAX_SILENT_MS: "2500" });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Codex turn timed out after \d+s without emitting events\. Its session log was still growing/);
+});
+
 test("task logs reasoning summaries and assistant messages to the job log", () => {
   const repo = makeTempDir();
   const binDir = makeTempDir();

@@ -19,6 +19,7 @@ export function run(command, args, options = {}) {
     encoding: "utf8",
     input: options.input,
     shell: options.shell ?? (process.platform === "win32" && !path.isAbsolute(command)),
+    timeout: options.timeout,
     windowsHide: true
   });
 }

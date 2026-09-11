@@ -120,6 +120,42 @@ function writeTempJsonFile(prefix, value) {
   return filePath;
 }
 
+// Longest stretch of stdout silence that session-log growth alone may excuse in
+// runCodexExecTask. Override per run with options.maxSilentMs.
+const DEFAULT_EXEC_MAX_SILENT_MS = 45 * 60 * 1000;
+
+// Codex writes each session to $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl,
+// under the local day the session started. Today and yesterday are checked in both local
+// time and UTC so a session that crossed midnight is still found. A resumed thread from an
+// older day is not found, and the idle timer then falls back to stdout-only liveness.
+function findExecRolloutPath(threadId, env = process.env) {
+  if (!/^[\w-]+$/.test(String(threadId ?? ""))) {
+    return null;
+  }
+  const codexHome = env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  const suffix = `-${threadId}.jsonl`;
+  const pad = (value) => String(value).padStart(2, "0");
+  const dayDirs = new Set();
+  for (const stamp of [Date.now(), Date.now() - 24 * 60 * 60 * 1000]) {
+    const day = new Date(stamp);
+    dayDirs.add(path.join(codexHome, "sessions", String(day.getFullYear()), pad(day.getMonth() + 1), pad(day.getDate())));
+    dayDirs.add(path.join(codexHome, "sessions", String(day.getUTCFullYear()), pad(day.getUTCMonth() + 1), pad(day.getUTCDate())));
+  }
+  for (const dir of dayDirs) {
+    let names;
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    const match = names.find((name) => name.startsWith("rollout-") && name.endsWith(suffix));
+    if (match) {
+      return path.join(dir, match);
+    }
+  }
+  return null;
+}
+
 function resolveCodexSpawnTarget(env = process.env) {
   if (process.platform !== "win32") {
     return { command: "codex", shell: false, preArgs: [] };
@@ -1477,9 +1513,61 @@ export async function runCodexExecTask(cwd, options = {}) {
   let stdoutRemainder = "";
   let idleTimer = null;
   let timedOut = false;
+  let timedOutSilentMs = 0;
+  let timedOutWhileLogGrew = false;
+  let silentSince = Date.now();
+  let rolloutPath = null;
+  let rolloutBaseline = null;
   let finalizationTimer = null;
   let finalizedAfterMessage = false;
   let killChild = () => {};
+
+  // The idle timer used to watch stdout alone. Codex CLI 0.154 writes no --json
+  // events while the model polls a long-running shell command, so PM#2053 c1
+  // (2026-09-11) lost two DEEP reviews at exactly 300s of stdout silence while the
+  // model was still reading fresh output from a 20+ minute test file. The session
+  // rollout file keeps growing through those polls, so growth now counts as
+  // liveness. Size, not mtime: on Windows the rollout's mtime stays frozen at its
+  // creation time while Codex holds the file open. maxSilentMs caps how long growth
+  // alone can keep a turn alive, so a model polling a truly hung command still dies.
+  const maxSilentMs = options.maxSilentMs ?? DEFAULT_EXEC_MAX_SILENT_MS;
+
+  const sampleRolloutSize = () => {
+    if (!threadId) {
+      return null;
+    }
+    rolloutPath ??= findExecRolloutPath(threadId, options.env ?? process.env);
+    if (!rolloutPath) {
+      return null;
+    }
+    try {
+      return fs.statSync(rolloutPath).size;
+    } catch {
+      return null;
+    }
+  };
+
+  const onIdleTimeout = () => {
+    idleTimer = null;
+    const silentMs = Date.now() - silentSince;
+    const size = sampleRolloutSize();
+    if (size !== null && size > (rolloutBaseline ?? 0)) {
+      rolloutBaseline = size;
+      if (silentMs < maxSilentMs) {
+        emitProgress(
+          options.onProgress,
+          `No Codex events for ${Math.round(silentMs / 1000)}s, but its session log is still growing (likely waiting on a long-running command). Still waiting.`,
+          "investigating"
+        );
+        idleTimer = setTimeout(onIdleTimeout, options.idleTimeoutMs);
+        return;
+      }
+      timedOutWhileLogGrew = true;
+    }
+    timedOut = true;
+    timedOutSilentMs = silentMs;
+    killChild();
+  };
 
   const resetIdleTimer = () => {
     if (!options.idleTimeoutMs) {
@@ -1488,10 +1576,9 @@ export async function runCodexExecTask(cwd, options = {}) {
     if (idleTimer) {
       clearTimeout(idleTimer);
     }
-    idleTimer = setTimeout(() => {
-      timedOut = true;
-      killChild();
-    }, options.idleTimeoutMs);
+    silentSince = Date.now();
+    rolloutBaseline = sampleRolloutSize();
+    idleTimer = setTimeout(onIdleTimeout, options.idleTimeoutMs);
   };
 
   const clearFinalizationTimer = () => {
@@ -1579,6 +1666,9 @@ export async function runCodexExecTask(cwd, options = {}) {
       switch (event.type) {
         case "thread.started":
           threadId = event.thread_id ?? threadId;
+          // resetIdleTimer ran before this line was parsed, while threadId was still
+          // unknown. Re-take the baseline now so startup records are not counted as growth.
+          rolloutBaseline = sampleRolloutSize();
           emitProgress(options.onProgress, threadId ? `Thread ready (${threadId}).` : "Thread ready.", "starting", {
             threadId: threadId ?? null
           });
@@ -1698,7 +1788,9 @@ export async function runCodexExecTask(cwd, options = {}) {
           return;
         }
         if (timedOut && options.idleTimeoutMs) {
-          reject(new Error(`Codex turn timed out after ${Math.ceil(options.idleTimeoutMs / 1000)}s without progress.`));
+          reject(new Error(timedOutWhileLogGrew
+            ? `Codex turn timed out after ${Math.ceil(timedOutSilentMs / 1000)}s without emitting events. Its session log was still growing, so the model was most likely waiting on a long-running command (limit: CODEX_TASK_MAX_SILENT_MS).`
+            : `Codex turn timed out after ${Math.ceil(options.idleTimeoutMs / 1000)}s without progress.`));
           return;
         }
         resolve(code ?? 1);

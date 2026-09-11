@@ -69,6 +69,9 @@ const REVIEW_SCHEMA = path.join(ROOT_DIR, "schemas", "review-output.schema.json"
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000;
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000;
 const TASK_IDLE_TIMEOUT_MS = readPositiveEnvInt("CODEX_TASK_IDLE_TIMEOUT_MS", 300000);
+// Cap on stdout silence excused by Codex session-log growth. Unset keeps the
+// runtime default (45 min) in lib/codex.mjs.
+const TASK_MAX_SILENT_MS = readPositiveEnvInt("CODEX_TASK_MAX_SILENT_MS", undefined);
 const MAX_CODEX_EXEC_PROMPT_CHARS = readPositiveEnvInt("CODEX_MAX_PROMPT_CHARS", 900000);
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const REASONING_EFFORT_ALIASES = new Map([["minimal", "low"]]);
@@ -950,7 +953,8 @@ async function executeReviewRun(request) {
     model: request.model,
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     onProgress: request.onProgress,
-    idleTimeoutMs: TASK_IDLE_TIMEOUT_MS
+    idleTimeoutMs: TASK_IDLE_TIMEOUT_MS,
+    maxSilentMs: TASK_MAX_SILENT_MS
   });
   // Use lastMessage (the final agent_message only) for JSON parsing — the review
   // schema expects a single JSON blob, not the accumulated multi-message string.
@@ -1082,6 +1086,7 @@ async function executeTaskRun(request) {
     effort: request.effort,
     onProgress: request.onProgress,
     idleTimeoutMs: TASK_IDLE_TIMEOUT_MS,
+    maxSilentMs: TASK_MAX_SILENT_MS,
     finalizationTimeoutMs
   });
 

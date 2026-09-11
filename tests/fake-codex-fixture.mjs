@@ -356,6 +356,40 @@ function handleExec(args) {
     return false;
   }
 
+  // Silent-but-alive simulation (PM#2053, 2026-09-11). Codex CLI 0.154 writes no
+  // --json events while the model polls a long-running shell command, but its
+  // session rollout file under $CODEX_HOME/sessions/YYYY/MM/DD keeps growing.
+  //   silent-rollout-progress: grows for ~1s, then finishes normally
+  //   silent-rollout-stops:    grows briefly, then goes truly quiet forever
+  //   silent-rollout-forever:  grows forever and never finishes
+  if (BEHAVIOR === "silent-rollout-progress" || BEHAVIOR === "silent-rollout-stops" || BEHAVIOR === "silent-rollout-forever") {
+    const day = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const sessionsDir = path.join(process.env.CODEX_HOME, "sessions", String(day.getFullYear()), pad(day.getMonth() + 1), pad(day.getDate()));
+    fs.mkdirSync(sessionsDir, { recursive: true });
+    const rolloutPath = path.join(sessionsDir, "rollout-fake-" + threadId + ".jsonl");
+    // Real Codex writes session metadata before the first event, so the file exists
+    // (with content that must not count as growth) by the time thread.started lands.
+    fs.writeFileSync(rolloutPath, JSON.stringify({ type: "session_meta" }) + "\\n");
+    emitExecEvent({ type: "thread.started", thread_id: threadId });
+    emitExecEvent({ type: "turn.started", turn_id: turnId });
+    let writes = 0;
+    setInterval(() => {
+      if (BEHAVIOR === "silent-rollout-stops" && writes >= 3) {
+        return;
+      }
+      fs.appendFileSync(rolloutPath, JSON.stringify({ type: "poll", n: writes }) + "\\n");
+      writes += 1;
+      if (BEHAVIOR === "silent-rollout-progress" && writes >= 60) {
+        emitExecEvent({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: payload } });
+        emitExecEvent({ type: "turn.completed" });
+        writeLastMessageFile(outputLastMessage, payload);
+        process.exit(0);
+      }
+    }, 50);
+    return false;
+  }
+
   // Incremental-write review simulation (PM#2011 V3-e, 2026-08-31). The real model
   // writes the review to disk section by section via apply_patch and appends
   // <!-- REVIEW COMPLETE --> as its final act. When the finalization timer kills the
