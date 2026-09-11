@@ -359,7 +359,7 @@ function handleExec(args) {
   // Silent-but-alive simulation (PM#2053, 2026-09-11). Codex CLI 0.154 writes no
   // --json events while the model polls a long-running shell command, but its
   // session rollout file under $CODEX_HOME/sessions/YYYY/MM/DD keeps growing.
-  //   silent-rollout-progress: grows for ~1s, then finishes normally
+  //   silent-rollout-progress: grows for ~10s, then finishes normally
   //   silent-rollout-stops:    grows briefly, then goes truly quiet forever
   //   silent-rollout-forever:  grows forever and never finishes
   if (BEHAVIOR === "silent-rollout-progress" || BEHAVIOR === "silent-rollout-stops" || BEHAVIOR === "silent-rollout-forever") {
@@ -380,7 +380,7 @@ function handleExec(args) {
       }
       fs.appendFileSync(rolloutPath, JSON.stringify({ type: "poll", n: writes }) + "\\n");
       writes += 1;
-      if (BEHAVIOR === "silent-rollout-progress" && writes >= 60) {
+      if (BEHAVIOR === "silent-rollout-progress" && writes >= 200) {
         emitExecEvent({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: payload } });
         emitExecEvent({ type: "turn.completed" });
         writeLastMessageFile(outputLastMessage, payload);

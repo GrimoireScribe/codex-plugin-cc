@@ -926,7 +926,9 @@ function runSilentRolloutTask(behavior, extraEnv = {}) {
 // PM#2053 (2026-09-11): two DEEP reviews were killed while Codex was polling a slow
 // test file. The CLI emitted nothing on stdout, but its session log kept growing.
 test("task is not killed while stdout is silent but the Codex session log keeps growing", () => {
-  const result = runSilentRolloutTask("silent-rollout-progress");
+  // A 2.5s idle window against writes every 50ms for ~10s: a correct runtime needs a 2.5s
+  // write stall to fail, while one that ignores growth is still killed long before the end.
+  const result = runSilentRolloutTask("silent-rollout-progress", { CODEX_TASK_IDLE_TIMEOUT_MS: "2500" });
 
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stderr, /timed out/);
