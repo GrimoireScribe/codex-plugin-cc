@@ -1,6 +1,6 @@
 ---
 description: Run a Codex review that challenges the implementation approach and design choices
-argument-hint: '[--wait|--background] [--model <model|spark>] [--base <ref>] [--commit <sha|A..B>] [--scope auto|working-tree|branch] [focus ...]'
+argument-hint: '[--wait|--background] [--model <model|spark>] [--base <ref>] [--commit <sha|A..B>] [--context-file <absolute-path>] [--scope auto|working-tree|branch] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -47,6 +47,7 @@ Argument handling:
 - `--commit` takes a single SHA or a commit range (`A..B`, `A^..B`, `A...B`). A range is reviewed as one combined diff over every commit in it.
 - It does not support `--scope staged` or `--scope unstaged`.
 - Unlike `/codex:review`, it can still take extra focus text after the flags.
+- `--context-file <path>`: optional absolute path to a UTF-8 text file with supplemental reviewer context. Use it instead of positional focus text when the context is large (Windows caps a command line at 32,767 characters). An empty value, an unreadable file, an empty file, or a file over 256 KB fails before Codex starts. `/codex:review` rejects this flag.
 
 Foreground flow:
 - Run:

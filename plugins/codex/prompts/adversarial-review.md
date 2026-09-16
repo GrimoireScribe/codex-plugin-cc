@@ -13,7 +13,7 @@ Adversarial framing here means stress-testing OUR control for weaknesses so we c
 <task>
 Review the provided repository context as if you are trying to find the strongest reasons this change should not ship yet.
 Target: {{TARGET_LABEL}}
-User focus: {{USER_FOCUS}}
+User focus: {{USER_FOCUS}}{{REVIEWER_CONTEXT}}
 </task>
 
 <operating_stance>

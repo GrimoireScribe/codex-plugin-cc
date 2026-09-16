@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
 import {
+  buildAdversarialReviewPrompt,
   buildSpecAdversarialReviewPrompt,
   buildScopingAdversarialReviewPrompt,
   buildReviewerContextBlock,
@@ -651,4 +652,123 @@ test("CLI: scoping-adversarial-review --context-file carries a canary token into
   const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
   assert.match(fakeState.lastTurnStart.prompt, /ZX9-CTX-NATIVE-CANARY/);
   assert.ok(!fakeState.lastTurnStart.prompt.includes(contextFilePath), "the context file's path must not reach the spawned prompt");
+});
+
+// =========================================================================
+// Code-review path: adversarial-review --context-file (2026-09-16, PM#2066).
+// The positional focus text overflowed the Windows CreateProcess ceiling, so
+// the code path now takes the same --context-file as spec/scoping.
+// =========================================================================
+
+const CODE_REVIEW_CONTEXT = {
+  target: { label: "commit abc123" },
+  inputMode: "inline-diff",
+  collectionGuidance: "Use the inlined diff.",
+  content: "diff --git a/x b/x"
+};
+
+test("code review: no reviewer context renders the USER_FOCUS line exactly as before the flag existed", () => {
+  const withoutOption = buildAdversarialReviewPrompt(CODE_REVIEW_CONTEXT, "focus words");
+  const withEmpty = buildAdversarialReviewPrompt(CODE_REVIEW_CONTEXT, "focus words", { reviewerContext: "" });
+  assert.equal(withoutOption, withEmpty);
+  assert.ok(normalizeEol(withoutOption).includes("User focus: focus words\n</task>"));
+  assert.ok(!withoutOption.includes("REVIEWER CONTEXT"));
+  assert.ok(!withoutOption.includes("{{"), "no placeholder may survive interpolation");
+});
+
+test("code review: a reviewer context block lands inside <task>, after USER_FOCUS, with focus text kept", () => {
+  const dir = makeTempDir("reviewer-context-code-");
+  const contextFilePath = writeContextFile(dir, "note.txt", "Carry this constraint: ZX9-CTX-CODE-CANARY.");
+  const reviewerContext = buildReviewerContextBlock(contextFilePath);
+  const prompt = buildAdversarialReviewPrompt(CODE_REVIEW_CONTEXT, "focus words", { reviewerContext });
+
+  const userFocusIndex = prompt.indexOf("User focus: focus words");
+  const labelIndex = prompt.indexOf(REVIEWER_CONTEXT_LABEL);
+  const canaryIndex = prompt.indexOf("ZX9-CTX-CODE-CANARY");
+  const taskEnd = prompt.indexOf("</task>");
+  assert.ok(userFocusIndex !== -1 && labelIndex !== -1 && canaryIndex !== -1 && taskEnd !== -1);
+  assert.ok(prompt.indexOf("<task>") < userFocusIndex);
+  assert.ok(userFocusIndex < labelIndex && labelIndex < canaryIndex && canaryIndex < taskEnd);
+  assert.ok(!prompt.includes(contextFilePath), "the context file's path must not leak into the prompt");
+});
+
+function setUpCommittedRepo() {
+  const { repo, binDir } = setUpRepoAndCodex();
+  fs.writeFileSync(path.join(repo, "app.js"), "export const x = 1;\n");
+  run("git", ["add", "app.js"], { cwd: repo });
+  run("git", ["commit", "-m", "add app"], { cwd: repo });
+  return { repo, binDir };
+}
+
+test("CLI: adversarial-review --context-file carries a context larger than the Windows command-line ceiling", () => {
+  const { repo, binDir } = setUpCommittedRepo();
+  const outputPath = path.join(repo, "out.md");
+  const big = "Carry this constraint: ZX9-CTX-CODE-CANARY.\n" + "x".repeat(40 * 1024) + "\nZX9-CTX-CODE-TAIL\n";
+  assert.ok(Buffer.byteLength(big) > 32767);
+  const contextFilePath = writeContextFile(repo, "dispatch-note.txt", big);
+
+  const result = run(
+    "node",
+    [SCRIPT, "adversarial-review", "--commit", "HEAD", "--output", outputPath, "--wait", "--context-file", contextFilePath, "positional focus kept"],
+    { cwd: repo, env: buildEnv(binDir) }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  const prompt = fakeState.lastTurnStart.prompt;
+  assert.match(prompt, /ZX9-CTX-CODE-CANARY/);
+  assert.match(prompt, /ZX9-CTX-CODE-TAIL/, "the whole file must be carried, not truncated");
+  assert.match(prompt, /User focus: positional focus kept/);
+  assert.ok(prompt.includes(REVIEWER_CONTEXT_LABEL));
+  assert.ok(!prompt.includes(contextFilePath), "the context file's path must not reach the spawned prompt");
+  assert.ok(fs.existsSync(outputPath), "review output must be written");
+});
+
+test("CLI: adversarial-review without --context-file still carries positional focus and no context block", () => {
+  const { repo, binDir } = setUpCommittedRepo();
+
+  const result = run(
+    "node",
+    [SCRIPT, "adversarial-review", "--commit", "HEAD", "--wait", "inline focus only"],
+    { cwd: repo, env: buildEnv(binDir) }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
+  assert.match(fakeState.lastTurnStart.prompt, /User focus: inline focus only\r?\n<\/task>/);
+  assert.ok(!fakeState.lastTurnStart.prompt.includes("REVIEWER CONTEXT"));
+});
+
+for (const [label, argsFor, pattern] of [
+  ["an empty value", () => [""], /--context-file was given an empty value/],
+  ["a missing file", (repo) => [path.join(repo, "does-not-exist.txt")], /--context-file could not be read/],
+  ["an empty file", (repo) => [writeContextFile(repo, "blank.txt", "  \n")], /--context-file is empty or whitespace-only/],
+  ["an over-cap file", (repo) => [writeContextFile(repo, "huge.txt", "y".repeat(REVIEWER_CONTEXT_MAX_BYTES + 1))], /--context-file exceeds/]
+]) {
+  test(`CLI: adversarial-review --context-file with ${label} exits nonzero and never invokes codex`, () => {
+    const { repo, binDir } = setUpCommittedRepo();
+    const outputPath = path.join(repo, "out.md");
+    const result = run(
+      "node",
+      [SCRIPT, "adversarial-review", "--commit", "HEAD", "--output", outputPath, "--wait", "--context-file", ...argsFor(repo)],
+      { cwd: repo, env: buildEnv(binDir), shell: false }
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, pattern);
+    assert.ok(!fs.existsSync(path.join(binDir, "fake-codex-state.json")), "codex must never be invoked");
+    assert.ok(!fs.existsSync(outputPath), "no review output must be written");
+  });
+}
+
+test("CLI: review --context-file is rejected instead of silently dropped", () => {
+  const { repo, binDir } = setUpCommittedRepo();
+  const contextFilePath = writeContextFile(repo, "note.txt", "Some context.");
+  const result = run(
+    "node",
+    [SCRIPT, "review", "--commit", "HEAD", "--wait", "--context-file", contextFilePath],
+    { cwd: repo, env: buildEnv(binDir) }
+  );
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--context-file is only supported by adversarial-review/);
+  assert.ok(!fs.existsSync(path.join(binDir, "fake-codex-state.json")), "codex must never be invoked");
 });

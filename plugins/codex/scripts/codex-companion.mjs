@@ -790,6 +790,13 @@ skip it entirely if the diff is self-contained. Do not chain graph queries.`;
 
 function buildAdversarialReviewPrompt(context, focusText, options = {}) {
   const template = loadPromptTemplate(ROOT_DIR, "adversarial-review");
+  // options.reviewerContext is the already-built buildReviewerContextBlock() string (or
+  // empty). The template places {{REVIEWER_CONTEXT}} inline at the end of the USER_FOCUS
+  // line, and the separator is only added when a block exists, so a review without
+  // --context-file renders byte-for-byte the same prompt it did before the flag existed.
+  const reviewerContext = options.reviewerContext ? `
+
+${options.reviewerContext}` : "";
   // Only pre-scope when the diff is actually inlined (inputMode "inline-diff"); if the
   // context was too large to inline (self-collect), the model must inspect it itself, so
   // the bounded "do not explore" instruction would leave it with nothing to review.
@@ -798,6 +805,7 @@ function buildAdversarialReviewPrompt(context, focusText, options = {}) {
     REVIEW_KIND: "Adversarial Review",
     TARGET_LABEL: context.target.label,
     USER_FOCUS: focusText || "No extra focus provided.",
+    REVIEWER_CONTEXT: reviewerContext,
     REVIEW_METHOD_EXPLORATION: fastBounded ? FAST_TIER_EXPLORATION : DEEP_TIER_EXPLORATION,
     REVIEW_COLLECTION_GUIDANCE: context.collectionGuidance,
     REVIEW_INPUT: context.content
@@ -932,11 +940,12 @@ async function executeReviewRun(request) {
   const focusText = request.focusText?.trim() ?? "";
   const reviewName = request.reviewName ?? "Review";
   const fastTier = isFastTierReviewModel(request.model);
+  const reviewerContext = request.reviewerContext ?? "";
   let context = collectReviewContext(request.cwd, target);
   let prompt =
     reviewName === "Review" || reviewName === "MCP Review"
       ? buildMcpReviewPrompt(context, focusText, { fastTier })
-      : buildAdversarialReviewPrompt(context, focusText, { fastTier });
+      : buildAdversarialReviewPrompt(context, focusText, { fastTier, reviewerContext });
 
   if (prompt.length > MAX_CODEX_EXEC_PROMPT_CHARS && context.inputMode !== "self-collect") {
     request.onProgress?.(
@@ -949,7 +958,7 @@ async function executeReviewRun(request) {
     prompt =
       reviewName === "Review" || reviewName === "MCP Review"
         ? buildMcpReviewPrompt(context, focusText, { fastTier })
-        : buildAdversarialReviewPrompt(context, focusText, { fastTier });
+        : buildAdversarialReviewPrompt(context, focusText, { fastTier, reviewerContext });
   }
   const result = await runCodexExecTask(context.repoRoot, {
     prompt,
@@ -1412,7 +1421,7 @@ function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd", "commit", "output"],
+    valueOptions: ["base", "scope", "model", "cwd", "commit", "output", "context-file"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -1422,6 +1431,16 @@ async function handleReviewCommand(argv, config) {
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
   const focusText = positionals.join(" ").trim();
+  // Optional caller dispatch-note file, same contract as the spec/scoping commands. It exists
+  // so callers can carry reviewer context that would overflow the Windows CreateProcess
+  // command-line ceiling (32,767 chars) as a positional. Only the adversarial template
+  // carries it; the native review path would silently drop it, so reject it there instead.
+  // The block is built here, before any job or exec work, so a bad file fails fast.
+  const contextFilePath = resolveContextFileOption(options["context-file"]);
+  if (contextFilePath && config.reviewName !== "Adversarial Review") {
+    throw new Error("--context-file is only supported by adversarial-review.");
+  }
+  const reviewerContext = buildReviewerContextBlock(contextFilePath);
   const target = resolveReviewTarget(cwd, {
     base: options.base,
     scope: options.scope,
@@ -1448,6 +1467,7 @@ async function handleReviewCommand(argv, config) {
         commit: options.commit,
         model: normalizeRequestedModel(options.model),
         focusText,
+        reviewerContext,
         reviewName: config.reviewName,
         onProgress: progress
       }),
