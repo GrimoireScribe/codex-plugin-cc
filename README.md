@@ -151,8 +151,8 @@ Examples:
 /codex:rescue investigate why the tests started failing
 /codex:rescue fix the failing test with the smallest safe patch
 /codex:rescue --resume apply the top fix from the last run
-/codex:rescue --model gpt-5.4-mini --effort medium investigate the flaky integration test
-/codex:rescue --model spark fix the issue quickly
+/codex:rescue --model luna --effort medium investigate the flaky integration test
+/codex:rescue --model sol fix the issue quickly
 /codex:rescue --background investigate the regression
 ```
 
@@ -164,8 +164,8 @@ Ask Codex to redesign the database connection to be more resilient.
 
 **Notes:**
 
-- if you do not pass `--model` or `--effort`, Codex chooses its own defaults.
-- if you say `spark`, the plugin maps that to `gpt-5.3-codex-spark`
+- if you do not pass `--model` or `--effort`, the plugin uses its own default (`gpt-6-astra` at `medium`), not whatever `config.toml` says.
+- `astra`, `sol`, and `luna` are shorthands the plugin maps to `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`
 - follow-up rescue requests can continue the latest Codex task in the repo
 
 ### `/codex:transfer`
@@ -276,20 +276,31 @@ The Codex plugin wraps the [Codex app server](https://developers.openai.com/code
 
 ### Common Configurations
 
-If you want to change the default reasoning effort or the default model that gets used by the plugin, you can define that inside your user-level or project-level `config.toml`. For example to always use `gpt-5.4-mini` on `high` for a specific project you can add the following to a `.codex/config.toml` file at the root of the directory you started Claude in:
+The plugin sets its own default model and reasoning effort (`gpt-6-astra` at `medium`) and does not read `model` or `model_reasoning_effort` from `~/.codex/config.toml` or a project-level `config.toml` on any command it launches — it always passes `--model` and the reasoning effort explicitly. To change the default, either:
 
-```toml
-model = "gpt-5.4-mini"
-model_reasoning_effort = "high"
+- set `CODEX_DEFAULT_MODEL` and/or `CODEX_DEFAULT_EFFORT` in your environment, or
+- pass `--model`/`--effort` on the individual command.
+
+`/codex:review` is a Claude Code slash command, not a shell command, so the env vars have to be set in the environment Claude Code itself runs in, not on the slash-command line. Either export them in the shell you launch Claude Code from, or set them under `env` in Claude Code's `settings.json`:
+
+```json
+{
+  "env": {
+    "CODEX_DEFAULT_MODEL": "sol",
+    "CODEX_DEFAULT_EFFORT": "high"
+  }
+}
 ```
 
-Your configuration will be picked up based on:
+They are also readable directly by the companion script, which is useful when scripting or testing outside Claude Code:
 
-- user-level config in `~/.codex/config.toml`
-- project-level overrides in `.codex/config.toml`
-- project-level overrides only load when the [project is trusted](https://developers.openai.com/codex/config-advanced#project-config-files-codexconfigtoml)
+```bash
+CODEX_DEFAULT_MODEL=sol CODEX_DEFAULT_EFFORT=high node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-companion.mjs" review
+```
 
-Check out the Codex docs for more [configuration options](https://developers.openai.com/codex/config-reference).
+An explicit `--model`/`--effort` flag always wins over the env vars, which in turn win over the plugin's built-in default.
+
+Check out the Codex docs for more [configuration options](https://developers.openai.com/codex/config-reference) that apply outside this plugin's own model/effort selection.
 
 ### Moving The Work Over To Codex
 

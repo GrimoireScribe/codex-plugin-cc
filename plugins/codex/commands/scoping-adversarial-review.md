@@ -1,6 +1,6 @@
 ---
 description: Run an incremental-write adversarial framing review of a scoping plan (phase-level docs/ops/plans/*.md). Writes each of the 5 scoping review sections to disk as it goes and appends <!-- REVIEW COMPLETE --> as the final act. Use this instead of /codex:adversarial-review for scoping plan review.
-argument-hint: '--spec <absolute-scoping-plan-path> --output <absolute-output-path> [--model <model|spark>] [--context-file <absolute-path>] [--wait|--background]'
+argument-hint: '--spec <absolute-scoping-plan-path> --output <absolute-output-path> [--model <model|astra|sol|luna>] [--context-file <absolute-path>] [--wait|--background]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 ---

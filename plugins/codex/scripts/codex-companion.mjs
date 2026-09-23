@@ -79,14 +79,22 @@ const MAX_CODEX_EXEC_PROMPT_CHARS = readPositiveEnvInt("CODEX_MAX_PROMPT_CHARS",
 const VALID_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const REASONING_EFFORT_ALIASES = new Map([["minimal", "low"]]);
 const MODEL_ALIASES = new Map([
-  ["spark", "gpt-5.3-codex-spark"],
-  // GPT-5.6 tiered family (Opus/Sonnet/Haiku-analogous): sol = flagship, terra = mini,
-  // luna = nano. Shorthands so `--model terra` resolves to the full id before the
-  // fast-tier check below sees it.
-  ["sol", "gpt-5.6-sol"],
-  ["terra", "gpt-5.6-terra"],
-  ["luna", "gpt-5.6-luna"]
+  // GPT-6 tiered family (frontier/workhorse/fast): astra = frontier, sol = workhorse,
+  // luna = fast/cheap. Shorthands so `--model sol` resolves to the full id before the
+  // fast-tier check below sees it. No alias for gpt-5.6-terra — `--model terra` passes
+  // through unchanged as the literal string "terra", same as any other unknown model name.
+  ["astra", "gpt-6-astra"],
+  ["sol", "gpt-6-sol"],
+  ["luna", "gpt-6-luna"]
 ]);
+// Plugin-level default model/effort. Applied by resolveModel/resolveEffort/
+// resolveSpecScopingEffort when the caller passes neither an explicit --model/--effort
+// flag nor a CODEX_DEFAULT_MODEL/CODEX_DEFAULT_EFFORT env override. This plugin always
+// launches Codex with an explicit --model and model_reasoning_effort, so
+// ~/.codex/config.toml's own model/effort settings are never consulted on any path this
+// plugin drives.
+const DEFAULT_MODEL = "gpt-6-astra";
+const DEFAULT_EFFORT = "medium";
 const STOP_REVIEW_TASK_MARKER = "Run a stop-gate review of the previous Claude turn.";
 const REVIEW_COMPLETE_MARKER = "<!-- REVIEW COMPLETE -->";
 
@@ -404,9 +412,9 @@ function printUsage() {
       "  node scripts/codex-companion.mjs setup [--enable-review-gate|--disable-review-gate] [--json]",
       "  node scripts/codex-companion.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>]",
       "  node scripts/codex-companion.mjs adversarial-review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [focus text]",
-      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|spark>] [--effort <none|minimal|low|medium|high|xhigh>] [--expect-file <path[,path...]>] [prompt]",
-      "  node scripts/codex-companion.mjs spec-adversarial-review --spec <path> --output <path> [--model <model|spark>] [--effort <level>]",
-      "  node scripts/codex-companion.mjs scoping-adversarial-review --spec <path> --output <path> [--model <model|spark>] [--effort <level>]",
+      "  node scripts/codex-companion.mjs task [--background] [--write] [--resume-last|--resume|--fresh] [--model <model|astra|sol|luna>] [--effort <none|minimal|low|medium|high|xhigh>] [--expect-file <path[,path...]>] [prompt]",
+      "  node scripts/codex-companion.mjs spec-adversarial-review --spec <path> --output <path> [--model <model|astra|sol|luna>] [--effort <level>]",
+      "  node scripts/codex-companion.mjs scoping-adversarial-review --spec <path> --output <path> [--model <model|astra|sol|luna>] [--effort <level>]",
       "  node scripts/codex-companion.mjs transfer [--source <claude-jsonl>] [--json]",
       "  node scripts/codex-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/codex-companion.mjs result [job-id] [--json]",
@@ -452,6 +460,52 @@ function normalizeReasoningEffort(effort) {
     );
   }
   return REASONING_EFFORT_ALIASES.get(normalized) ?? normalized;
+}
+
+// CODEX_DEFAULT_MODEL goes through the same alias normalization as --model, so
+// CODEX_DEFAULT_MODEL=sol resolves to gpt-6-sol. Empty/whitespace value = unset.
+function resolveDefaultModelEnv() {
+  const raw = process.env.CODEX_DEFAULT_MODEL;
+  if (raw == null || !raw.trim()) {
+    return null;
+  }
+  return normalizeRequestedModel(raw);
+}
+
+// CODEX_DEFAULT_EFFORT goes through the same validation/normalization as --effort, so an
+// invalid value fails loudly (naming the env var) instead of being silently ignored.
+// Empty/whitespace value = unset.
+function resolveDefaultEffortEnv() {
+  const raw = process.env.CODEX_DEFAULT_EFFORT;
+  if (raw == null || !raw.trim()) {
+    return null;
+  }
+  try {
+    return normalizeReasoningEffort(raw);
+  } catch (error) {
+    throw new Error(`Invalid CODEX_DEFAULT_EFFORT: ${error.message}`);
+  }
+}
+
+// Resolves the model for every command that launches a Codex turn: explicit --model flag
+// > CODEX_DEFAULT_MODEL env > built-in default (gpt-6-astra). config.toml's own model
+// setting is never consulted — this plugin always passes --model explicitly.
+function resolveModel(explicitModel) {
+  return explicitModel ?? resolveDefaultModelEnv() ?? DEFAULT_MODEL;
+}
+
+// The effort the CALLER supplied: explicit --effort flag, else CODEX_DEFAULT_EFFORT env
+// (env counts as "supplied" — only an explicit flag or env value skips the built-in
+// default below), or null if neither was given. Used directly by resolveEffort, and by
+// the fast-tier cap in resolveSpecScopingEffort BEFORE that resolver's own default fill.
+function resolveCallerSuppliedEffort(explicitEffort) {
+  return explicitEffort ?? resolveDefaultEffortEnv();
+}
+
+// Resolves effort for task and code-review paths (no fast-tier cap applies to these):
+// explicit flag > env > built-in default (medium).
+function resolveEffort(explicitEffort) {
+  return resolveCallerSuppliedEffort(explicitEffort) ?? DEFAULT_EFFORT;
 }
 
 function normalizeArgv(argv) {
@@ -592,19 +646,17 @@ async function handleSetup(argv) {
   outputResult(options.json ? finalReport : renderSetupReport(finalReport), options.json);
 }
 
-// Fast-tier reviewers (gpt-5.4-mini, gpt-5.3-codex-spark, and the GPT-5.6 small tiers
-// gpt-5.6-terra/gpt-5.6-luna) are smaller models that over-explore: less confident about
-// code they haven't read, they compensate by reading everything. On a tiny diff that means
+// Fast-tier reviewers (gpt-6-luna and the smaller GPT-5.6 tiers, gpt-5.6-terra and
+// gpt-5.6-luna) are smaller/cheaper models that over-explore: less confident about code
+// they haven't read, they compensate by reading everything. On a tiny diff that means
 // repo-wide grep sweeps + full-file reads that balloon context past 1M tokens until each
 // turn exceeds the 300s idle timeout (silent timeout) or the child is killed mid-turn
-// (exit 0 + empty output). Deep tier can self-scope and reason about a diff without reading
-// its surroundings, so it keeps the full exploratory method. Fast tier gets pre-scoped:
-// review only the provided context, do not go hunting through the repo. terra (the 5.6 mini
-// variant) and luna (nano) are capped pre-emptively — same class as gpt-5.4-mini, so we
-// don't wait for a repeat blowup to confirm it. See diagnosis 2026-05-31.
+// (exit 0 + empty output). Deep tier (gpt-6-astra, gpt-6-sol, gpt-5.6-sol, gpt-5.5) can
+// self-scope and reason about a diff without reading its surroundings, so it keeps the
+// full exploratory method. Fast tier gets pre-scoped: review only the provided context,
+// do not go hunting through the repo. See diagnosis 2026-05-31.
 const FAST_TIER_REVIEW_MODELS = new Set([
-  "gpt-5.4-mini",
-  "gpt-5.3-codex-spark",
+  "gpt-6-luna",
   "gpt-5.6-terra",
   "gpt-5.6-luna"
 ]);
@@ -616,14 +668,15 @@ function isFastTierReviewModel(model) {
   return FAST_TIER_REVIEW_MODELS.has(String(model).trim().toLowerCase());
 }
 
-// Fast-tier spec/scoping reviews must not run at xhigh. xhigh reasoning on the mini/spark
-// tier drives a reasoning + file-read explosion: one ACT-WARNING spec review on
-// gpt-5.4-mini at xhigh churned 3.18M cumulative input tokens across 40 file reads over
-// ~12 minutes (diagnosis 2026-06-28) before completing — far past the 300s idle budget, so
-// the orchestrator saw a hung/failed review. Cap fast tier at "high": full deliberation
-// without the runaway. `null` (no explicit --effort) is forced to "high" too, so a future
-// xhigh config default cannot silently re-introduce the blowup. Lower explicit efforts
-// (low/medium) are respected as-is.
+// Fast-tier spec/scoping reviews must not run at xhigh. xhigh reasoning on a small
+// fast-tier model drives a reasoning + file-read explosion: one ACT-WARNING spec review
+// on a small fast-tier model at xhigh churned 3.18M cumulative input tokens across 40 file
+// reads over ~12 minutes (diagnosis 2026-06-28) before completing — far past the 300s idle
+// budget, so the orchestrator saw a hung/failed review. Cap fast tier at "high": full
+// deliberation without the runaway. `null` (no explicit --effort) is forced to "high" too,
+// so a future CODEX_DEFAULT_EFFORT=xhigh cannot silently re-introduce the blowup (config.toml
+// is no longer read for effort at all — see resolveSpecScopingEffort). Lower explicit
+// efforts (low/medium) are respected as-is.
 function capFastTierReviewEffort(model, effort) {
   if (!isFastTierReviewModel(model)) {
     return effort;
@@ -632,6 +685,18 @@ function capFastTierReviewEffort(model, effort) {
     return "high";
   }
   return effort;
+}
+
+// Resolves effort for spec/scoping adversarial reviews. The fast-tier cap must see the
+// effort the CALLER supplied (flag, else env) BEFORE the built-in default is filled in: a
+// fast-tier model with no --effort flag and no CODEX_DEFAULT_EFFORT env must still land on
+// the capped "high", not silently fall through to the built-in "medium" default. PO's fast
+// spec/scoping wrappers pass --model gpt-5.6-terra with no --effort and rely on getting
+// "high" — that must not regress. Non-fast-tier models are unaffected by the cap and just
+// get explicit > env > "medium" like every other path.
+function resolveSpecScopingEffort(model, explicitEffort) {
+  const capped = capFastTierReviewEffort(model, resolveCallerSuppliedEffort(explicitEffort));
+  return capped ?? DEFAULT_EFFORT;
 }
 
 // Fast-tier spec review gets a hard verification budget. The spec-review prompt invites the
@@ -817,7 +882,7 @@ function buildMcpReviewPrompt(context, focusText, options = {}) {
   // Same fast-tier pre-scoping as the adversarial path: only bound exploration when
   // the diff is actually inlined (inline-diff). On self-collect there is nothing
   // inlined to review, so the model must keep the exploratory method. See the
-  // gpt-5.4-mini code-review timeout diagnosis 2026-06-04 (same cause as 93f0396,
+  // fast-tier code-review timeout diagnosis 2026-06-04 (same cause as 93f0396,
   // which only covered the adversarial path).
   const fastBounded = options.fastTier === true && context.inputMode === "inline-diff";
   return interpolateTemplate(template, {
@@ -963,6 +1028,7 @@ async function executeReviewRun(request) {
   const result = await runCodexExecTask(context.repoRoot, {
     prompt,
     model: request.model,
+    effort: request.effort,
     outputSchema: readOutputSchema(REVIEW_SCHEMA),
     onProgress: request.onProgress,
     idleTimeoutMs: TASK_IDLE_TIMEOUT_MS,
@@ -1051,7 +1117,7 @@ async function executeTaskRun(request) {
   // full artifact inline in a fenced markdown block" and "do NOT persist via Bash
   // heredocs" — which directly contradicts the incremental-write protocol that tells
   // the model to call apply_patch section-by-section. The two instructions are in
-  // direct conflict, and gpt-5.4 has been observed obeying the hygiene block (emitting
+  // direct conflict, and Codex has been observed obeying the hygiene block (emitting
   // plan narration) instead of the apply_patch protocol (writing sections to disk).
   const taskPrompt = request.write
     ? (request.incrementalWrite ? request.prompt : buildWriteTaskPrompt(request.prompt))
@@ -1079,8 +1145,8 @@ async function executeTaskRun(request) {
   })();
 
   // For incremental-write commands (spec/scoping-adversarial-review), extend the
-  // finalization timer. gpt-5.4 emits planning narration as agent_message items
-  // between apply_patch calls, and deliberates for longer than 5s between sections.
+  // finalization timer. The reviewer model emits planning narration as agent_message
+  // items between apply_patch calls, and deliberates for longer than 5s between sections.
   // The default 5s timer was killing the process mid-review.
   //
   // Raised 60s -> 180s after PM#2011 V3-e (2026-08-31): gpt-5.6-sol narrated
@@ -1421,7 +1487,7 @@ function enqueueBackgroundTask(cwd, job, request) {
 
 async function handleReviewCommand(argv, config) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["base", "scope", "model", "cwd", "commit", "output", "context-file"],
+    valueOptions: ["base", "scope", "model", "effort", "cwd", "commit", "output", "context-file"],
     booleanOptions: ["json", "background", "wait"],
     aliasMap: {
       m: "model"
@@ -1430,6 +1496,12 @@ async function handleReviewCommand(argv, config) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
+  // Resolved up front, before createCompanionJob, so an invalid --effort or invalid
+  // CODEX_DEFAULT_EFFORT throws here and fails the command immediately instead of inside
+  // the job runner, where the error would only surface as a "failed" job already written to
+  // status (task/spec/scoping resolve model/effort the same way, before job creation).
+  const model = resolveModel(normalizeRequestedModel(options.model));
+  const effort = resolveEffort(normalizeReasoningEffort(options.effort));
   const focusText = positionals.join(" ").trim();
   // Optional caller dispatch-note file, same contract as the spec/scoping commands. It exists
   // so callers can carry reviewer context that would overflow the Windows CreateProcess
@@ -1465,7 +1537,8 @@ async function handleReviewCommand(argv, config) {
         base: options.base,
         scope: options.scope,
         commit: options.commit,
-        model: normalizeRequestedModel(options.model),
+        model,
+        effort,
         focusText,
         reviewerContext,
         reviewName: config.reviewName,
@@ -1513,8 +1586,8 @@ async function handleTask(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
-  const model = normalizeRequestedModel(options.model);
-  const effort = normalizeReasoningEffort(options.effort);
+  const model = resolveModel(normalizeRequestedModel(options.model));
+  const effort = resolveEffort(normalizeReasoningEffort(options.effort));
   const prompt = readTaskPrompt(cwd, options, positionals);
   const expectFiles = parseExpectFiles(rawExpectFiles, cwd);
 
@@ -1594,8 +1667,8 @@ async function handleSpecAdversarialReview(argv) {
   // buildSpecAdversarialReviewPrompt, at flag time, before any exec work begins.
   const contextFilePath = resolveContextFileOption(options["context-file"]);
 
-  const model = normalizeRequestedModel(options.model);
-  const effort = capFastTierReviewEffort(model, normalizeReasoningEffort(options.effort));
+  const model = resolveModel(normalizeRequestedModel(options.model));
+  const effort = resolveSpecScopingEffort(model, normalizeReasoningEffort(options.effort));
   const fastTier = isFastTierReviewModel(model);
 
   const prompt = buildSpecAdversarialReviewPrompt({ specPath, outputPath, specSlug, fastTier, contextFilePath });
@@ -1621,8 +1694,8 @@ async function handleSpecAdversarialReview(argv) {
         effort,
         write: true,
         // incrementalWrite: the model writes sections one-by-one via apply_patch.
-        // This flag: (1) extends the finalization timer to 60s so gpt-5.4 has time to
-        // deliberate between sections without the process being killed, and (2) suppresses
+        // This flag: (1) extends the finalization timer to 60s so the reviewer model has
+        // time to deliberate between sections without the process being killed, and (2) suppresses
         // the companion-layer fallback write so plan-narration is never dumped to the
         // output file as if it were review content.
         incrementalWrite: true,
@@ -1654,8 +1727,8 @@ async function handleScopingAdversarialReview(argv) {
   // buildScopingAdversarialReviewPrompt, at flag time, before any exec work begins.
   const contextFilePath = resolveContextFileOption(options["context-file"]);
 
-  const model = normalizeRequestedModel(options.model);
-  const effort = capFastTierReviewEffort(model, normalizeReasoningEffort(options.effort));
+  const model = resolveModel(normalizeRequestedModel(options.model));
+  const effort = resolveSpecScopingEffort(model, normalizeReasoningEffort(options.effort));
   const fastTier = isFastTierReviewModel(model);
 
   const prompt = buildScopingAdversarialReviewPrompt({

@@ -1,6 +1,6 @@
 ---
 description: Run an incremental-write adversarial review of a spec file. Writes each review section to disk as it goes and appends <!-- REVIEW COMPLETE --> as the final act. Use this instead of /codex:adversarial-review for spec prose review.
-argument-hint: '--spec <absolute-spec-path> --output <absolute-output-path> [--model <model|spark>] [--context-file <absolute-path>] [--wait|--background]'
+argument-hint: '--spec <absolute-spec-path> --output <absolute-output-path> [--model <model|astra|sol|luna>] [--context-file <absolute-path>] [--wait|--background]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*)
 ---

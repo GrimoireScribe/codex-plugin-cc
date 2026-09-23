@@ -1,12 +1,12 @@
 ---
-name: gpt-5-4-prompting
-description: Internal guidance for composing Codex and GPT-5.4 prompts for coding, review, diagnosis, and research tasks inside the Codex Claude Code plugin
+name: gpt-prompting
+description: Internal guidance for composing prompts for Codex and its GPT models, for coding, review, diagnosis, and research tasks inside the Codex Claude Code plugin
 user-invocable: false
 ---
 
-# GPT-5.4 Prompting
+# GPT Prompting
 
-Use this skill when `codex:codex-rescue` needs to ask Codex or another GPT-5.4-based workflow for help.
+Use this skill when `codex:codex-rescue` needs to ask Codex, or any of the current Codex models, for help.
 
 Prompt Codex like an operator, not a collaborator. Keep prompts compact and block-structured with XML tags. State the task, the output contract, the follow-through defaults, and the small set of extra constraints that matter.
 

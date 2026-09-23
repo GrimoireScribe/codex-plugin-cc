@@ -1,6 +1,6 @@
 ---
 description: Run a Codex review that challenges the implementation approach and design choices
-argument-hint: '[--wait|--background] [--model <model|spark>] [--base <ref>] [--commit <sha|A..B>] [--context-file <absolute-path>] [--scope auto|working-tree|branch] [focus ...]'
+argument-hint: '[--wait|--background] [--model <model|astra|sol|luna>] [--effort <none|minimal|low|medium|high|xhigh>] [--base <ref>] [--commit <sha|A..B>] [--context-file <absolute-path>] [--scope auto|working-tree|branch] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -40,6 +40,7 @@ Argument handling:
 - Preserve the user's arguments exactly.
 - Do not strip `--wait` or `--background` yourself.
 - Preserve `--model` if the user supplied one.
+- Preserve `--effort` if the user supplied one.
 - Do not weaken the adversarial framing or rewrite the user's focus text.
 - The companion script parses `--wait` and `--background`, but Claude Code's `Bash(..., run_in_background: true)` is what actually detaches the run.
 - `/codex:adversarial-review` uses the same review target selection as `/codex:review`.

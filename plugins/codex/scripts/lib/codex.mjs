@@ -1683,7 +1683,7 @@ export async function runCodexExecTask(cwd, options = {}) {
   // if no new item.started event arrives in that window. It is a fallback for when
   // turn.completed never fires (e.g. Codex exits without emitting the event).
   //
-  // Default is 30s. The previous 5s default was too aggressive — gpt-5.4 can take
+  // Default is 30s. The previous 5s default was too aggressive — a reviewer model can take
   // longer than 5s to deliberate between tool calls, causing the child to be killed
   // mid-turn. Incremental-write reviews (spec/scoping-adversarial-review) use 180s
   // (passed explicitly via options.finalizationTimeoutMs) because the model narrates
